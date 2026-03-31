@@ -355,6 +355,41 @@ function Test-DockerDaemonReachable {
     }
 }
 
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 3,
+        [int]$InitialDelaySec = 2,
+        [string]$ActionDescription = 'operation'
+    )
+
+    if ($MaxAttempts -lt 1) {
+        throw 'Invoke-WithRetry requires MaxAttempts >= 1.'
+    }
+
+    $attempt = 0
+    $delay = [Math]::Max(1, $InitialDelaySec)
+    $lastError = $null
+
+    while ($attempt -lt $MaxAttempts) {
+        $attempt += 1
+        try {
+            return & $ScriptBlock
+        } catch {
+            $lastError = $_
+            if ($attempt -ge $MaxAttempts) {
+                break
+            }
+            Start-Sleep -Seconds $delay
+            $delay = [Math]::Min(30, $delay * 2)
+        }
+    }
+
+    $reason = if ($lastError) { $lastError.Exception.Message } else { 'unknown error' }
+    throw "Failed $ActionDescription after $MaxAttempts attempts. Last error: $reason"
+}
+
 function Get-JsonHash {
     param([object]$Object)
 

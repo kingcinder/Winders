@@ -60,6 +60,12 @@ if (-not $backend.Ready) {
 }
 
 $drift = Get-OpenWebUiDriftStatus -Config $config
+$frontendPortOwner = Get-PortOwner -Port ([int]$config.FrontendPort)
+if ($frontendPortOwner -and (-not $drift.ContainerState.Exists -or -not $drift.ContainerState.Running)) {
+    $ownerPath = if ($frontendPortOwner.ExecutablePath) { $frontendPortOwner.ExecutablePath } else { '<unknown>' }
+    Fail-Ui "Configured frontend port $($config.FrontendPort) is already occupied by PID $($frontendPortOwner.Pid), process '$($frontendPortOwner.ProcessName)', executable '$ownerPath'."
+}
+
 $compose = Get-OpenWebUiComposeContent -Config $config -Fingerprint $drift.Fingerprint
 $compose | Set-Content -Path $config.OpenWebUiComposeFile -Encoding UTF8
 Write-StackLog -Config $config -Component 'OPENWEBUI' -Level 'INFO' -Message "Wrote compose file with fingerprint $($drift.Fingerprint)."

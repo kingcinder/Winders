@@ -24,9 +24,11 @@ function Write-InstallLog($msg) {
 }
 
 function Get-LatestLlamaCppVulkanAsset {
-    $api = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest'
+    $api = $config.LlamaReleaseApi
     Write-Info 'Querying latest official llama.cpp release...'
-    $release = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'WindowsPowerShell' }
+    $release = Invoke-WithRetry -ActionDescription "querying llama.cpp release API '$api'" -ScriptBlock {
+        Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'WindowsPowerShell' }
+    }
 
     if (-not $release.assets) {
         throw 'GitHub API returned no assets.'
@@ -51,7 +53,9 @@ function Get-LatestLlamaCppVulkanAsset {
 
 function Download-File($url, $dest) {
     Write-Info "Downloading: $url"
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    Invoke-WithRetry -ActionDescription "downloading '$url'" -ScriptBlock {
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    } | Out-Null
 }
 
 function Reset-Directory($path) {
@@ -67,6 +71,25 @@ function Find-Exe($root, $name) {
         throw "Could not find $name under $root"
     }
     return $found.FullName
+}
+
+function Test-ExistingRuntimeHealthy {
+    param([pscustomobject]$CurrentConfig)
+
+    if (-not (Test-Path -LiteralPath $CurrentConfig.BackendBinaryPath)) {
+        return $false
+    }
+
+    try {
+        $versionOutput = & $CurrentConfig.BackendBinaryPath --version 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
+            return $false
+        }
+        $deviceOutput = & $CurrentConfig.BackendBinaryPath --list-devices 2>&1
+        return ($LASTEXITCODE -eq 0 -and $deviceOutput)
+    } catch {
+        return $false
+    }
 }
 
 function Detect-GpuIndex($llamaServerExe) {
@@ -143,37 +166,48 @@ function Promote-StagedBin {
     }
 }
 
-$asset = Get-LatestLlamaCppVulkanAsset
-Write-InstallLog "Selected llama.cpp asset: $($asset.Name) from tag $($asset.Tag)."
-$zipPath = Join-Path $config.TempDir $asset.Name
-$extractPath = Join-Path $config.TempDir 'extract'
-$stageDir = Join-Path $config.Root 'bin.new'
+$runtimeHealthy = Test-ExistingRuntimeHealthy -CurrentConfig $config
+if ($runtimeHealthy) {
+    Write-InstallLog "Existing runtime is healthy at '$($config.BackendBinaryPath)'. Reusing existing install."
+    if (-not (Test-Path -LiteralPath $config.GPUIndexStateFile)) {
+        Write-InstallLog 'GPU index state missing; redetecting Vulkan GPU index.'
+        $null = Detect-GpuIndex -llamaServerExe $config.BackendBinaryPath
+    }
+    $llamaServerExe = $config.BackendBinaryPath
+} else {
+    Write-InstallLog 'Existing runtime missing or unhealthy. Installing fresh llama.cpp runtime.'
+    $asset = Get-LatestLlamaCppVulkanAsset
+    Write-InstallLog "Selected llama.cpp asset: $($asset.Name) from tag $($asset.Tag)."
+    $zipPath = Join-Path $config.TempDir $asset.Name
+    $extractPath = Join-Path $config.TempDir 'extract'
+    $stageDir = Join-Path $config.Root 'bin.new'
 
-Reset-Directory $config.TempDir
-Reset-Directory $extractPath
-Reset-Directory $stageDir
+    Reset-Directory $config.TempDir
+    Reset-Directory $extractPath
+    Reset-Directory $stageDir
 
-Download-File $asset.Url $zipPath
-if (-not (Test-Path -LiteralPath $zipPath) -or ((Get-Item -LiteralPath $zipPath).Length -le 0)) {
-    throw "Downloaded archive '$zipPath' is missing or empty."
+    Download-File $asset.Url $zipPath
+    if (-not (Test-Path -LiteralPath $zipPath) -or ((Get-Item -LiteralPath $zipPath).Length -le 0)) {
+        throw "Downloaded archive '$zipPath' is missing or empty."
+    }
+
+    Write-InstallLog "Extracting archive to $extractPath."
+    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+    Write-InstallLog "Staging extracted contents into $stageDir."
+    Copy-Item -Path (Join-Path $extractPath '*') -Destination $stageDir -Recurse -Force
+
+    $stagedExe = Find-Exe -root $stageDir -name 'llama-server.exe'
+    if (-not (Test-Path -LiteralPath $stagedExe)) {
+        throw 'Staged bin.new does not contain llama-server.exe.'
+    }
+
+    Write-InstallLog "Promoting staged bin from $stageDir into $($config.BinDir)."
+    Promote-StagedBin -StageDir $stageDir -BinDir $config.BinDir
+
+    $llamaServerExe = Find-Exe -root $config.BinDir -name 'llama-server.exe'
+    $null = Detect-GpuIndex -llamaServerExe $llamaServerExe
 }
-
-Write-InstallLog "Extracting archive to $extractPath."
-Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-Write-InstallLog "Staging extracted contents into $stageDir."
-Copy-Item -Path (Join-Path $extractPath '*') -Destination $stageDir -Recurse -Force
-
-$stagedExe = Find-Exe -root $stageDir -name 'llama-server.exe'
-if (-not (Test-Path -LiteralPath $stagedExe)) {
-    throw 'Staged bin.new does not contain llama-server.exe.'
-}
-
-Write-InstallLog "Promoting staged bin from $stageDir into $($config.BinDir)."
-Promote-StagedBin -StageDir $stageDir -BinDir $config.BinDir
-
-$llamaServerExe = Find-Exe -root $config.BinDir -name 'llama-server.exe'
-$null = Detect-GpuIndex -llamaServerExe $llamaServerExe
 
 $configHash['BackendBinaryPath'] = $llamaServerExe
 $config = Resolve-StackConfig -Config $configHash
