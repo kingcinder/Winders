@@ -1,10 +1,15 @@
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptRoot 'stack-common.ps1')
-$config = Load-StackConfig -ConfigPath (Resolve-StackConfigPath -ScriptRoot $ScriptRoot)
-$health = Invoke-HttpCheck -Uri "http://$($config.BackendHost):$($config.BackendPort)/health"
-$models = Invoke-HttpCheck -Uri "http://$($config.BackendHost):$($config.BackendPort)/v1/models"
-Write-Host "health_ok=$($health.Ok) status=$($health.StatusCode)"
-Write-Host "models_ok=$($models.Ok) status=$($models.StatusCode)"
-if (-not $health.Ok -or -not $models.Ok) { exit 1 }
+. (Join-Path $PSScriptRoot 'stack-common.ps1')
+
+$config = Load-StackConfig
+Validate-StackConfig -Config $config
+
+$health = Test-UrlSuccess -Url $config.BackendHealthUrl
+$models = Test-UrlSuccess -Url $config.BackendModelsUrl
+
+Write-Host "health_ok=$($health.Success) status=$($health.StatusCode)"
+Write-Host "models_ok=$($models.Success) status=$($models.StatusCode)"
+
+if (-not $health.Success -or -not $models.Success) {
+    exit 1
+}

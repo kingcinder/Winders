@@ -1,61 +1,181 @@
 param(
-    [switch]$SmokeTest
+    [ValidateSet('auto', 'local', 'smoke-test')]
+    [string]$ModePreference = 'auto',
+    [string]$StartReason = 'manual-start'
 )
-Set-StrictMode -Version Latest
+
 $ErrorActionPreference = 'Stop'
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptRoot 'stack-common.ps1')
+. (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$config = Load-StackConfig -ConfigPath (Resolve-StackConfigPath -ScriptRoot $ScriptRoot)
-$paths = Get-StackPaths -Config $config
-Ensure-StackDirectories -Paths $paths
-$log = $paths.BackendLog
-$stdoutLog = Join-Path $paths.Logs $config.BackendStdOutLogName
-$stderrLog = Join-Path $paths.Logs $config.BackendStdErrLogName
-$pidFile = Get-BackendPidFilePath -Paths $paths -Config $config
-$llamaExe = Get-LlamaServerExe -Paths $paths
-if (-not $llamaExe) { throw 'llama-server.exe missing. Run setup-local-llm-stack.ps1 first.' }
+$config = Load-StackConfig
+Validate-StackConfig -Config $config
+Ensure-StackDirectories -Config $config
 
-$healthUrl = "http://$($config.BackendHost):$($config.BackendPort)/health"
-$existing = Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($existing) {
-    if (Wait-HttpReady -Uri $healthUrl -TimeoutSec 8) {
-        Write-Log -LogFile $log -Message 'llama-server already running and healthy; reusing.'
+function Fail-Backend {
+    param([string]$Message)
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'ERROR' -Message $Message
+    exit 1
+}
+
+function Get-GpuIndex {
+    if (-not [string]::IsNullOrWhiteSpace([string]$config.GPUIndexOverride)) {
+        return [int][string]$config.GPUIndexOverride
+    }
+
+    if (-not (Test-Path -LiteralPath $config.GPUIndexStateFile)) {
+        Fail-Backend "GPU index state file missing at '$($config.GPUIndexStateFile)'."
+    }
+
+    $value = (Get-Content -Raw -LiteralPath $config.GPUIndexStateFile).Trim()
+    if (-not ($value -match '^\d+$')) {
+        Fail-Backend "GPU index state file '$($config.GPUIndexStateFile)' does not contain a numeric value."
+    }
+
+    return [int]$value
+}
+
+function Start-BackendProcess {
+    param(
+        [ValidateSet('local', 'smoke-test')]
+        [string]$Mode,
+        [string]$StartReasonText
+    )
+
+    $gpuIndex = Get-GpuIndex
+    $arguments = New-Object System.Collections.Generic.List[string]
+
+    if ($Mode -eq 'local') {
+        $arguments.Add('-m')
+        $arguments.Add($config.LocalModelPath)
+        $requestedModel = $config.LocalModelPath
+        $actualModel = $config.LocalModelPath
+    } else {
+        $arguments.Add('-hf')
+        $arguments.Add($config.SmokeTestModelRepo)
+        $requestedModel = if ($ModePreference -eq 'local') { $config.LocalModelPath } else { $config.SmokeTestModelRepo }
+        $actualModel = $config.SmokeTestModelRepo
+    }
+
+    foreach ($item in @('--host', $config.BackendHost, '--port', [string]$config.BackendPort, '-c', [string]$config.ContextLength, '-ngl', 'auto', '-sm', 'none', '-mg', [string]$gpuIndex, '-fit', 'on', '-fa', 'auto')) {
+        $arguments.Add($item)
+    }
+
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message "Starting backend in mode '$Mode' because $StartReasonText."
+    $process = Start-Process -FilePath $config.BackendBinaryPath -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $config.BackendBinaryPath) -RedirectStandardOutput (Join-Path $config.LogsDir $config.BackendStdOutLogName) -RedirectStandardError (Join-Path $config.LogsDir $config.BackendStdErrLogName) -PassThru
+    $process.Id | Set-Content -Path $config.BackendPidFile -Encoding ASCII
+
+    $status = Wait-ForBackendReady -Config $config -TimeoutSec $config.BackendStartupTimeoutSec
+    if (-not $status.Ready) {
+        Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message "Backend mode '$Mode' did not reach full readiness. /health=$($status.HealthOk), /v1/models=$($status.ModelsOk)."
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        return [pscustomobject]@{
+            Success = $false
+            Mode = $Mode
+        }
+    }
+
+    Write-StackState -Config $config -Updates @{
+        BackendMode = $Mode
+        LastModelRequested = $requestedModel
+        LastModelActuallyUsed = $actualModel
+        FallbackTriggered = $false
+        LastStartReason = $StartReason
+        LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+    }
+
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Backend ready. /health and /v1/models both passed.'
+    return [pscustomobject]@{
+        Success = $true
+        Mode = $Mode
+    }
+}
+
+if (-not (Test-Path -LiteralPath $config.BackendBinaryPath)) {
+    Fail-Backend "Backend binary missing at '$($config.BackendBinaryPath)'."
+}
+
+$ownership = Get-BackendOwnership -Config $config
+if (-not $ownership.BelongsToStack -and $ownership.Classification -in @('other-llama-server', 'unknown-port-owner')) {
+    $ownerPath = if ($ownership.ExecutablePath) { $ownership.ExecutablePath } else { '<unknown>' }
+    Fail-Backend "Configured backend port $($config.BackendPort) is occupied by PID $($ownership.Pid), process '$($ownership.ProcessName)', executable '$ownerPath'."
+}
+
+$currentStatus = Get-BackendStatus -Config $config
+if ($ownership.BelongsToStack -and $currentStatus.Ready) {
+    Write-StackState -Config $config -Updates @{
+        LastStartReason = $StartReason
+        LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+    }
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Reusing existing backend. /health and /v1/models both passed.'
+    exit 0
+}
+
+if ($ownership.BelongsToStack) {
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message 'Existing stack backend is not yet ready. Waiting before restart to avoid bouncing a warming process.'
+    $waitStatus = Wait-ForBackendReady -Config $config -TimeoutSec $config.StartupTimeoutSec
+    if ($waitStatus.Ready) {
+        Write-StackState -Config $config -Updates @{
+            LastStartReason = $StartReason
+            LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+        }
+        Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Existing backend became ready during wait. Reusing it.'
         exit 0
     }
-    throw "llama-server process exists (PID=$($existing.Id)) but /health is not healthy at $healthUrl. Run STOP-BACKEND.cmd then START-BACKEND.cmd."
-}
 
-$gpu = Get-GPUIndex -Paths $paths
-$modelArgs = @()
-if ($SmokeTest) {
-    $modelArgs = @('-hf', $config.SmokeTestRepo, '-hff', $config.SmokeTestFile)
-} else {
-    if (-not (Test-Path -LiteralPath $config.LocalModelPath)) {
-        throw "Local model missing at $($config.LocalModelPath). Either place GGUF there or use smoke mode."
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message "Existing stack backend is not ready. /health=$($waitStatus.HealthOk), /v1/models=$($waitStatus.ModelsOk). Restarting backend only."
+    if (-not (Stop-StackBackendProcess -Config $config)) {
+        Fail-Backend 'Failed to stop unhealthy backend owned by this stack.'
     }
-    $modelArgs = @('-m', $config.LocalModelPath)
 }
 
-$args = @(
-    '--host', $config.BackendHost,
-    '--port', [string]$config.BackendPort,
-    '-c', [string]$config.ContextLength,
-    '-ngl', [string]$config.GPULayers,
-    '-mg', [string]$gpu,
-    '-sm', 'none',
-    '-fit', 'on',
-    '-fa', 'auto'
-) + $modelArgs
-
-Write-Log -LogFile $log -Message "Launching backend with GPU index $gpu"
-$proc = Start-Process -FilePath $llamaExe -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
-Set-Content -Path $pidFile -Value "$($proc.Id)" -Encoding ASCII
-
-if (-not (Wait-HttpReady -Uri $healthUrl -TimeoutSec ([int]$config.BackendHealthTimeoutSec))) {
-    Write-Log -LogFile $log -Level 'WARN' -Message "Health check failed, collecting tail logs from $stdoutLog and $stderrLog"
-    Get-Content -Path $stdoutLog -Tail 40 -ErrorAction SilentlyContinue | Add-Content -Path $log
-    Get-Content -Path $stderrLog -Tail 40 -ErrorAction SilentlyContinue | Add-Content -Path $log
-    throw "llama-server started but /health not ready at $healthUrl within timeout."
+$localModel = Get-ConfiguredLocalModelStatus -Config $config
+$fallbackTriggered = $false
+$fallbackRequestedModel = $null
+$effectiveMode = switch ($ModePreference) {
+    'local' { 'local' }
+    'smoke-test' { 'smoke-test' }
+    default {
+        if ($localModel.Exists) { 'local' } else { 'smoke-test' }
+    }
 }
-Write-Log -LogFile $log -Message "Backend healthy at $healthUrl"
+
+if ($effectiveMode -eq 'local' -and -not $localModel.Exists) {
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message "Local model '$($config.LocalModelPath)' is missing. Falling back to smoke-test mode."
+    $fallbackTriggered = $true
+    $fallbackRequestedModel = $config.LocalModelPath
+    $effectiveMode = 'smoke-test'
+}
+
+$result = Start-BackendProcess -Mode $effectiveMode -StartReasonText $StartReason
+if ($result.Success) {
+    if ($fallbackTriggered) {
+        Write-StackState -Config $config -Updates @{
+            BackendMode = 'smoke-test'
+            LastModelRequested = $fallbackRequestedModel
+            LastModelActuallyUsed = $config.SmokeTestModelRepo
+            FallbackTriggered = $true
+            LastStartReason = $StartReason
+            LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+        }
+    }
+    exit 0
+}
+
+if ($effectiveMode -eq 'local') {
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message 'Local model mode failed readiness checks. Falling back to smoke-test mode.'
+    $fallback = Start-BackendProcess -Mode 'smoke-test' -StartReasonText 'local-model failed readiness'
+    if ($fallback.Success) {
+        Write-StackState -Config $config -Updates @{
+            BackendMode = 'smoke-test'
+            LastModelRequested = $config.LocalModelPath
+            LastModelActuallyUsed = $config.SmokeTestModelRepo
+            FallbackTriggered = $true
+            LastStartReason = $StartReason
+            LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+        }
+        exit 0
+    }
+}
+
+Fail-Backend 'Backend failed readiness checks. /health and /v1/models must both pass before success is reported.'

@@ -2,15 +2,6 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts\stack-common.ps1')
 
 $config = Load-StackConfig
-$configHash = ConvertTo-Hashtable -InputObject $config
-$configHash['DockerImage'] = 'ghcr.io/open-webui/open-webui:main'
-$configHash['ContainerName'] = 'open-webui'
-$configHash['OpenWebUiServiceName'] = 'open-webui'
-$configHash['FrontendPort'] = 3000
-$configHash['OpenWebUiAuthEnabled'] = $false
-$configHash['BrowserAutoOpen'] = $true
-$config = Resolve-StackConfig -Config $configHash
-
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
 Save-StackConfig -Config $config
@@ -22,13 +13,7 @@ $stopBat = Join-Path $config.ScriptsDir 'STOP-OPENWEBUI.cmd'
 $statusBat = Join-Path $config.ScriptsDir 'STATUS-OPENWEBUI.cmd'
 
 Write-CmdWrapper -Path $startBat -PowerShellArguments "-File `"$($config.ScriptsDir)\start-openwebui.ps1`""
-
-$stopContent = @"
-@echo off
-docker stop $($config.ContainerName)
-"@
-$stopContent | Set-Content -Path $stopBat -Encoding ASCII
-
+Write-CmdWrapper -Path $stopBat -PowerShellArguments "-File `"$($config.ScriptsDir)\stop-openwebui.ps1`""
 Write-CmdWrapper -Path $statusBat -PowerShellArguments "-File `"$($config.ScriptsDir)\status-stack.ps1`""
 
 $desktop = [Environment]::GetFolderPath('Desktop')

@@ -1,5 +1,26 @@
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+
+function ConvertTo-Hashtable {
+    param([object]$InputObject)
+
+    $result = @{}
+    if (-not $InputObject) {
+        return $result
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            $result[$key] = $InputObject[$key]
+        }
+        return $result
+    }
+
+    foreach ($property in $InputObject.PSObject.Properties) {
+        $result[$property.Name] = $property.Value
+    }
+
+    return $result
+}
 
 function Get-DefaultStackConfig {
     return [ordered]@{
@@ -12,127 +33,234 @@ function Get-DefaultStackConfig {
         GPULayers = 'auto'
         GPUIndexOverride = ''
         AutoOpenBrowser = $true
+        BrowserAutoOpen = $true
         DisableWebUIAuth = $true
+        OpenWebUiAuthEnabled = $false
         SmokeTestRepo = 'Qwen/Qwen2.5-1.5B-Instruct-GGUF'
         SmokeTestFile = 'qwen2.5-1.5b-instruct-q4_k_m.gguf'
         LocalModelPath = 'C:\LocalLLM\models\model.gguf'
+        StartupTimeoutSec = 120
         BackendHealthTimeoutSec = 120
+        BackendStartupTimeoutSec = 180
         UIHealthTimeoutSec = 120
+        UiStartupTimeoutSec = 120
         DockerImage = 'ghcr.io/open-webui/open-webui:main'
         ContainerName = 'open-webui-local'
-        StateDirName = 'state'
-        LogsDirName = 'logs'
-        BinDirName = 'bin'
-        ScriptsDirName = 'scripts'
-        ConfigDirName = 'config'
-        OpenWebUIDirName = 'openwebui'
+        OpenWebUiServiceName = 'open-webui'
+        OpenAiApiKey = 'local-not-needed'
+        GlobalLogLevel = 'INFO'
+        ConfigFileName = 'stack.json'
+        StateFileName = 'install-state.json'
         BackendPidFileName = 'backend.pid'
-        BackendStdOutLogName = 'backend-stdout.log'
-        BackendStdErrLogName = 'backend-stderr.log'
+        GPUIndexStateFileName = 'gpu-index.txt'
+        DeviceDumpFileName = 'devices.txt'
+        OpenWebUiFingerprintFileName = 'openwebui.fingerprint'
+        BackendStdOutLogName = 'backend.stdout.log'
+        BackendStdErrLogName = 'backend.stderr.log'
         LlamaReleaseApi = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest'
     }
 }
 
-function Merge-Config {
+function Resolve-StackConfigPath {
     param(
-        [hashtable]$Base,
-        [hashtable]$Override
+        [string]$ScriptRoot = '',
+        [string]$RepoRoot = ''
     )
-    $merged = @{}
-    foreach ($k in $Base.Keys) { $merged[$k] = $Base[$k] }
-    if ($Override) {
-        foreach ($k in $Override.Keys) {
-            if ($null -ne $Override[$k] -and "$($Override[$k])" -ne '') {
-                $merged[$k] = $Override[$k]
-            }
+
+    $candidates = @(
+        'C:\LocalLLM\config\stack.json',
+        'C:\LocalLLM\config\stack-config.json'
+    )
+
+    if ($RepoRoot) {
+        $candidates += @(
+            (Join-Path $RepoRoot 'config\stack.json'),
+            (Join-Path $RepoRoot 'config\stack-config.json')
+        )
+    }
+
+    if ($ScriptRoot) {
+        $repoFromScript = Split-Path -Parent $ScriptRoot
+        $candidates += @(
+            (Join-Path $repoFromScript 'config\stack.json'),
+            (Join-Path $repoFromScript 'config\stack-config.json')
+        )
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
         }
     }
-    return $merged
+
+    return 'C:\LocalLLM\config\stack.json'
 }
 
-function Get-StackPaths {
+function Get-StackConfigPath {
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    return (Resolve-StackConfigPath -ScriptRoot $PSScriptRoot -RepoRoot $repoRoot)
+}
+
+function Get-ConfigEntry {
+    param(
+        [hashtable]$Config,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($Config.ContainsKey($Name)) {
+        return $Config[$Name]
+    }
+    return $Default
+}
+
+function Resolve-StackConfig {
     param([hashtable]$Config)
-    $root = $Config.InstallRoot
-    return [ordered]@{
-        Root = $root
-        Bin = Join-Path $root $Config.BinDirName
-        Scripts = Join-Path $root $Config.ScriptsDirName
-        Logs = Join-Path $root $Config.LogsDirName
-        State = Join-Path $root $Config.StateDirName
-        Config = Join-Path $root $Config.ConfigDirName
-        Models = Join-Path $root 'models'
-        OpenWebUI = Join-Path $root $Config.OpenWebUIDirName
-        OpenWebUIData = Join-Path (Join-Path $root $Config.OpenWebUIDirName) 'data'
-        OpenWebUICompose = Join-Path (Join-Path $root $Config.OpenWebUIDirName) 'compose.yaml'
-        ConfigFile = Join-Path (Join-Path $root $Config.ConfigDirName) 'stack.json'
-        BootstrapLog = Join-Path (Join-Path $root $Config.LogsDirName) 'bootstrap.log'
-        BackendLog = Join-Path (Join-Path $root $Config.LogsDirName) 'backend.log'
-        OpenWebUILog = Join-Path (Join-Path $root $Config.LogsDirName) 'openwebui.log'
-        DevicesRaw = Join-Path (Join-Path $root $Config.StateDirName) 'llama_devices_raw.txt'
-        GPUState = Join-Path (Join-Path $root $Config.StateDirName) 'gpu-index.txt'
-        InstallState = Join-Path (Join-Path $root $Config.StateDirName) 'install-state.json'
+
+    $rootValue = Get-ConfigEntry -Config $Config -Name 'Root'
+    $installRootValue = Get-ConfigEntry -Config $Config -Name 'InstallRoot'
+    $root = if (-not [string]::IsNullOrWhiteSpace([string]$rootValue)) { $rootValue } else { $installRootValue }
+    if ([string]::IsNullOrWhiteSpace([string]$root)) {
+        $root = 'C:\LocalLLM'
     }
-}
 
-function Ensure-StackDirectories {
-    param([hashtable]$Paths)
-    foreach ($path in @($Paths.Root,$Paths.Bin,$Paths.Scripts,$Paths.Logs,$Paths.State,$Paths.Config,$Paths.Models,$Paths.OpenWebUI,$Paths.OpenWebUIData)) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            New-Item -ItemType Directory -Path $path -Force | Out-Null
-        }
+    $smokeRepoValue = Get-ConfigEntry -Config $Config -Name 'SmokeTestModelRepo'
+    $legacySmokeRepoValue = Get-ConfigEntry -Config $Config -Name 'SmokeTestRepo'
+    $smokeRepo = if (-not [string]::IsNullOrWhiteSpace([string]$smokeRepoValue)) { $smokeRepoValue } else { $legacySmokeRepoValue }
+    $browserAutoOpen = if ($Config.ContainsKey('BrowserAutoOpen')) { [bool]$Config['BrowserAutoOpen'] } else { [bool](Get-ConfigEntry -Config $Config -Name 'AutoOpenBrowser' -Default $true) }
+    $authEnabled = if ($Config.ContainsKey('OpenWebUiAuthEnabled')) { [bool]$Config['OpenWebUiAuthEnabled'] } else { -not [bool](Get-ConfigEntry -Config $Config -Name 'DisableWebUIAuth' -Default $true) }
+
+    $resolved = ConvertTo-Hashtable -InputObject $Config
+    $resolved.Root = $root
+    $resolved.InstallRoot = $root
+    $resolved.BinDir = if ($resolved.ContainsKey('BinDir') -and $resolved.BinDir) { $resolved.BinDir } else { Join-Path $root 'bin' }
+    $resolved.ModelsDir = if ($resolved.ContainsKey('ModelsDir') -and $resolved.ModelsDir) { $resolved.ModelsDir } else { Join-Path $root 'models' }
+    $resolved.ScriptsDir = if ($resolved.ContainsKey('ScriptsDir') -and $resolved.ScriptsDir) { $resolved.ScriptsDir } else { Join-Path $root 'scripts' }
+    $resolved.LogsDir = if ($resolved.ContainsKey('LogsDir') -and $resolved.LogsDir) { $resolved.LogsDir } else { Join-Path $root 'logs' }
+    $resolved.ConfigDir = if ($resolved.ContainsKey('ConfigDir') -and $resolved.ConfigDir) { $resolved.ConfigDir } else { Join-Path $root 'config' }
+    $resolved.StateDir = if ($resolved.ContainsKey('StateDir') -and $resolved.StateDir) { $resolved.StateDir } else { Join-Path $root 'state' }
+    $resolved.OpenWebUiDir = if ($resolved.ContainsKey('OpenWebUiDir') -and $resolved.OpenWebUiDir) { $resolved.OpenWebUiDir } else { Join-Path $root 'openwebui' }
+    $resolved.OpenWebUiDataDir = if ($resolved.ContainsKey('OpenWebUiDataDir') -and $resolved.OpenWebUiDataDir) { $resolved.OpenWebUiDataDir } else { Join-Path $resolved.OpenWebUiDir 'data' }
+    $resolved.TempDir = if ($resolved.ContainsKey('TempDir') -and $resolved.TempDir) { $resolved.TempDir } else { Join-Path $env:TEMP 'local-llm-bootstrap' }
+    $resolved.ConfigPath = if ($resolved.ContainsKey('ConfigPath') -and $resolved.ConfigPath) { $resolved.ConfigPath } else { Get-StackConfigPath }
+    $resolved.StateFileName = if ($resolved.ContainsKey('StateFileName') -and $resolved.StateFileName) { $resolved.StateFileName } else { 'install-state.json' }
+    $resolved.BackendPidFile = if ($resolved.ContainsKey('BackendPidFile') -and $resolved.BackendPidFile) { $resolved.BackendPidFile } else { Join-Path $resolved.StateDir $resolved.BackendPidFileName }
+    $resolved.GPUIndexStateFile = if ($resolved.ContainsKey('GPUIndexStateFile') -and $resolved.GPUIndexStateFile) { $resolved.GPUIndexStateFile } else { Join-Path $resolved.StateDir $resolved.GPUIndexStateFileName }
+    $resolved.DeviceDumpFile = if ($resolved.ContainsKey('DeviceDumpFile') -and $resolved.DeviceDumpFile) { $resolved.DeviceDumpFile } else { Join-Path $resolved.StateDir $resolved.DeviceDumpFileName }
+    $resolved.BackendBinaryPath = if ($resolved.ContainsKey('BackendBinaryPath') -and $resolved.BackendBinaryPath) { $resolved.BackendBinaryPath } else { Join-Path $resolved.BinDir 'llama-server.exe' }
+    $resolved.OpenWebUiComposeFile = if ($resolved.ContainsKey('OpenWebUiComposeFile') -and $resolved.OpenWebUiComposeFile) { $resolved.OpenWebUiComposeFile } else { Join-Path $resolved.OpenWebUiDir 'compose.yaml' }
+    $resolved.OpenWebUiFingerprintFile = if ($resolved.ContainsKey('OpenWebUiFingerprintFile') -and $resolved.OpenWebUiFingerprintFile) { $resolved.OpenWebUiFingerprintFile } else { Join-Path $resolved.StateDir $resolved.OpenWebUiFingerprintFileName }
+    $resolved.SmokeTestModelRepo = $smokeRepo
+    $resolved.SmokeTestRepo = $smokeRepo
+    $resolved.BrowserAutoOpen = $browserAutoOpen
+    $resolved.AutoOpenBrowser = $browserAutoOpen
+    $resolved.OpenWebUiAuthEnabled = $authEnabled
+    $resolved.DisableWebUIAuth = -not $authEnabled
+    if (-not $resolved.BackendStartupTimeoutSec) {
+        $resolved.BackendStartupTimeoutSec = if ($resolved.BackendHealthTimeoutSec) { $resolved.BackendHealthTimeoutSec } elseif ($resolved.StartupTimeoutSec) { $resolved.StartupTimeoutSec } else { 180 }
     }
-}
+    if (-not $resolved.UiStartupTimeoutSec) {
+        $resolved.UiStartupTimeoutSec = if ($resolved.UIHealthTimeoutSec) { $resolved.UIHealthTimeoutSec } elseif ($resolved.StartupTimeoutSec) { $resolved.StartupTimeoutSec } else { 120 }
+    }
+    $resolved.BackendBaseUrl = "http://$($resolved.BackendHost):$($resolved.BackendPort)"
+    $resolved.BackendHealthUrl = "$($resolved.BackendBaseUrl)/health"
+    $resolved.BackendModelsUrl = "$($resolved.BackendBaseUrl)/v1/models"
+    $resolved.FrontendUrl = "http://$($resolved.FrontendHost):$($resolved.FrontendPort)"
+    $resolved.BackendApiBaseUrl = "http://host.docker.internal:$($resolved.BackendPort)/v1"
 
-function Write-Log {
-    param(
-        [string]$Message,
-        [string]$Level = 'INFO',
-        [string]$LogFile
-    )
-    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $line = "[$ts][$Level] $Message"
-    Write-Host $line
-    if ($LogFile) { Add-Content -Path $LogFile -Value $line }
-}
-
-function Save-Json {
-    param([object]$Obj,[string]$Path)
-    ($Obj | ConvertTo-Json -Depth 8) | Set-Content -Path $Path -Encoding UTF8
+    return [pscustomobject]$resolved
 }
 
 function Load-StackConfig {
-    param([string]$ConfigPath)
-    $defaults = Get-DefaultStackConfig
-    if (-not (Test-Path -LiteralPath $ConfigPath)) {
-        return $defaults
-    }
-    $raw = Get-Content -Path $ConfigPath -Raw -Encoding UTF8
-    $custom = @{}
-    if ($raw.Trim().Length -gt 0) {
-        $obj = ConvertFrom-Json -InputObject $raw
-        foreach ($p in $obj.PSObject.Properties) {
-            $custom[$p.Name] = $p.Value
+    param([string]$ConfigPath = '')
+
+    $base = Get-DefaultStackConfig
+    $path = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Get-StackConfigPath } else { $ConfigPath }
+    if (Test-Path -LiteralPath $path) {
+        $existing = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        foreach ($key in (ConvertTo-Hashtable -InputObject $existing).Keys) {
+            $base[$key] = $existing.$key
         }
     }
-    return (Merge-Config -Base $defaults -Override $custom)
+
+    $base.ConfigPath = $path
+    return (Resolve-StackConfig -Config $base)
 }
 
-function Resolve-StackConfigPath {
-    param(
-        [string]$ScriptRoot,
-        [string]$RepoRoot = ''
-    )
-    $installedConfig = 'C:\LocalLLM\config\stack.json'
-    if (Test-Path -LiteralPath $installedConfig) { return $installedConfig }
-    if ($RepoRoot) {
-        $repoConfig = Join-Path $RepoRoot 'config/stack.json'
-        if (Test-Path -LiteralPath $repoConfig) { return $repoConfig }
+function Save-StackConfig {
+    param([pscustomobject]$Config)
+
+    $configHash = ConvertTo-Hashtable -InputObject $Config
+    $configHash.InstallRoot = $Config.Root
+    $configHash.SmokeTestRepo = $Config.SmokeTestModelRepo
+    $configHash.AutoOpenBrowser = $Config.BrowserAutoOpen
+    $configHash.DisableWebUIAuth = -not [bool]$Config.OpenWebUiAuthEnabled
+    $configHash.BackendHealthTimeoutSec = $Config.BackendStartupTimeoutSec
+    $configHash.UIHealthTimeoutSec = $Config.UiStartupTimeoutSec
+
+    foreach ($derived in @(
+        'Root','BinDir','ModelsDir','ScriptsDir','LogsDir','ConfigDir','StateDir','OpenWebUiDir','OpenWebUiDataDir',
+        'TempDir','ConfigPath','BackendPidFile','GPUIndexStateFile','DeviceDumpFile','BackendBinaryPath',
+        'OpenWebUiComposeFile','OpenWebUiFingerprintFile','BackendBaseUrl','BackendHealthUrl','BackendModelsUrl',
+        'FrontendUrl','BackendApiBaseUrl'
+    )) {
+        $null = $configHash.Remove($derived)
     }
-    if ($ScriptRoot) {
-        $siblingConfig = Join-Path (Split-Path -Parent $ScriptRoot) 'config\stack.json'
-        if (Test-Path -LiteralPath $siblingConfig) { return $siblingConfig }
+
+    $path = if (-not [string]::IsNullOrWhiteSpace([string]$Config.ConfigPath)) { $Config.ConfigPath } else { Get-StackConfigPath }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    $configHash | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
+}
+
+function Validate-StackConfig {
+    param([pscustomobject]$Config)
+
+    foreach ($field in @('BackendPort', 'FrontendPort')) {
+        $value = [string]$Config.$field
+        if (-not ($value -match '^\d+$')) {
+            throw "Invalid config field '$field': value '$value' is not numeric."
+        }
+        if ([int]$value -lt 1 -or [int]$value -gt 65535) {
+            throw "Invalid config field '$field': value '$value' is outside 1-65535."
+        }
     }
-    return $installedConfig
+
+    foreach ($field in @('StartupTimeoutSec', 'BackendStartupTimeoutSec', 'UiStartupTimeoutSec', 'ContextLength')) {
+        $value = [string]$Config.$field
+        if (-not ($value -match '^\d+$')) {
+            throw "Invalid config field '$field': value '$value' is not a positive integer."
+        }
+        if ([int]$value -le 0) {
+            throw "Invalid config field '$field': value '$value' must be greater than zero."
+        }
+    }
+
+    foreach ($field in @(
+        'Root','BinDir','ModelsDir','ScriptsDir','LogsDir','ConfigDir','StateDir','OpenWebUiDir','OpenWebUiDataDir',
+        'BackendHost','FrontendHost','LocalModelPath','DockerImage','ContainerName','OpenWebUiServiceName',
+        'OpenAiApiKey','GlobalLogLevel','SmokeTestModelRepo','SmokeTestFile','BackendPidFile','GPUIndexStateFile',
+        'DeviceDumpFile','OpenWebUiComposeFile','OpenWebUiFingerprintFile','BackendStdOutLogName','BackendStdErrLogName'
+    )) {
+        $value = [string]$Config.$field
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Invalid config field '$field': value '$value' must be non-empty."
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Config.GPUIndexOverride)) {
+        $gpuValue = [string]$Config.GPUIndexOverride
+        if (-not ($gpuValue -match '^\d+$')) {
+            throw "Invalid config field 'GPUIndexOverride': value '$gpuValue' is not numeric."
+        }
+    }
+
+    $invalidPathChars = [System.IO.Path]::GetInvalidPathChars()
+    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile')) {
+        $value = [string]$Config.$field
+        if ($value.IndexOfAny($invalidPathChars) -ge 0) {
+            throw "Invalid config field '$field': value '$value' contains invalid path characters."
+        }
+    }
 }
 
 function Test-IsAdmin {
@@ -142,255 +270,554 @@ function Test-IsAdmin {
 }
 
 function Assert-SupportedPlatform {
-    if (-not $IsWindows) { throw 'This stack only supports Windows hosts.' }
-    if ([Environment]::Is64BitOperatingSystem -ne $true) { throw 'Unsupported OS architecture. Windows x64 is required.' }
+    if (-not $IsWindows) {
+        throw 'This stack only supports Windows hosts.'
+    }
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        throw 'Unsupported OS architecture. Windows x64 is required.'
+    }
 }
 
-function Invoke-Retry {
+function Ensure-StackDirectories {
+    param([pscustomobject]$Config)
+
+    foreach ($path in @($Config.Root, $Config.BinDir, $Config.ModelsDir, $Config.ScriptsDir, $Config.LogsDir, $Config.ConfigDir, $Config.StateDir, $Config.OpenWebUiDir, $Config.OpenWebUiDataDir)) {
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
+    }
+}
+
+function Write-StackLog {
     param(
-        [scriptblock]$Action,
-        [int]$MaxAttempts = 3,
-        [int]$DelaySeconds = 3,
-        [string]$Description = 'operation'
+        [pscustomobject]$Config,
+        [string]$Component,
+        [ValidateSet('INFO', 'OK', 'WARN', 'ERROR')]
+        [string]$Level,
+        [string]$Message
     )
-    $last = $null
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        try { return & $Action } catch {
-            $last = $_
-            if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds $DelaySeconds }
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "$timestamp [$Component] [$Level] $Message"
+    $logFile = Join-Path $Config.LogsDir "$($Component.ToLowerInvariant()).log"
+    Add-Content -Path $logFile -Value $line -Encoding UTF8
+
+    $color = switch ($Level) {
+        'INFO' { 'Cyan' }
+        'OK' { 'Green' }
+        'WARN' { 'Yellow' }
+        default { 'Red' }
+    }
+    Write-Host $line -ForegroundColor $color
+}
+
+function Test-Cmd {
+    param([string]$Name)
+    return ($null -ne (Get-Command $Name -ErrorAction SilentlyContinue))
+}
+
+function Test-UrlSuccess {
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = 5
+    )
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec $TimeoutSec
+        return [pscustomobject]@{
+            Success = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+            StatusCode = $response.StatusCode
+            Error = $null
+            Body = $response.Content
+        }
+    } catch {
+        return [pscustomobject]@{
+            Success = $false
+            StatusCode = $null
+            Error = $_.Exception.Message
+            Body = $null
         }
     }
-    throw "Failed $Description after $MaxAttempts attempts. Last error: $last"
 }
 
-function Test-TcpPortInUse {
-    param([int]$Port)
-    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        return $null -ne $conn
+function Test-DockerCliAvailable {
+    return (Test-Cmd -Name 'docker')
+}
+
+function Test-DockerDaemonReachable {
+    if (-not (Test-DockerCliAvailable)) {
+        return $false
     }
-    $line = netstat -ano -p tcp | Select-String -Pattern "LISTENING\s+(\d+)$" | ForEach-Object { $_.Line } | Where-Object { $_ -match "[:\.]$Port\s" } | Select-Object -First 1
-    return $null -ne $line
+
+    try {
+        & docker version | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Get-JsonHash {
+    param([object]$Object)
+
+    $json = $Object | ConvertTo-Json -Depth 10 -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-StackStatePath {
+    param([pscustomobject]$Config)
+    return (Join-Path $Config.StateDir $Config.StateFileName)
+}
+
+function Read-StackState {
+    param([pscustomobject]$Config)
+
+    $path = Get-StackStatePath -Config $Config
+    if (-not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject]@{
+            BackendMode = $null
+            LastModelRequested = $null
+            LastModelActuallyUsed = $null
+            FallbackTriggered = $false
+            LastStartReason = $null
+            LastSuccessfulBackendReadyAt = $null
+            OpenWebUiConfigFingerprint = $null
+        }
+    }
+
+    return (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json)
+}
+
+function Write-StackState {
+    param(
+        [pscustomobject]$Config,
+        [hashtable]$Updates
+    )
+
+    $current = ConvertTo-Hashtable -InputObject (Read-StackState -Config $Config)
+    foreach ($key in $Updates.Keys) {
+        $current[$key] = $Updates[$key]
+    }
+
+    $path = Get-StackStatePath -Config $Config
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    $current | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
+}
+
+function Get-ProcessMetadata {
+    param([int]$Pid)
+
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid"
+        if (-not $process) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Pid = $Pid
+            ProcessName = $process.Name
+            ExecutablePath = $process.ExecutablePath
+            CommandLine = $process.CommandLine
+        }
+    } catch {
+        try {
+            $process = Get-Process -Id $Pid -ErrorAction Stop
+            return [pscustomobject]@{
+                Pid = $Pid
+                ProcessName = $process.ProcessName
+                ExecutablePath = $process.Path
+                CommandLine = $null
+            }
+        } catch {
+            return $null
+        }
+    }
+}
+
+function Get-PortOwner {
+    param([int]$Port)
+
+    $connection = $null
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+        try {
+            $connection = Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop |
+                Sort-Object -Property @{ Expression = { $_.State -ne 'Listen' } }, @{ Expression = 'OwningProcess' } |
+                Select-Object -First 1
+        } catch {
+            $connection = $null
+        }
+    }
+
+    if ($connection) {
+        $metadata = Get-ProcessMetadata -Pid $connection.OwningProcess
+        return [pscustomobject]@{
+            Port = $Port
+            Pid = $connection.OwningProcess
+            State = $connection.State
+            ProcessName = if ($metadata) { $metadata.ProcessName } else { $null }
+            ExecutablePath = if ($metadata) { $metadata.ExecutablePath } else { $null }
+            CommandLine = if ($metadata) { $metadata.CommandLine } else { $null }
+        }
+    }
+
+    $netstat = netstat -ano -p tcp 2>$null | Select-String -Pattern "[:\.]$Port\s+.*LISTENING\s+(\d+)$" | Select-Object -First 1
+    if (-not $netstat) {
+        return $null
+    }
+
+    $pid = [int](($netstat.Line -split '\s+')[-1])
+    $metadata = Get-ProcessMetadata -Pid $pid
+    return [pscustomobject]@{
+        Port = $Port
+        Pid = $pid
+        State = 'Listen'
+        ProcessName = if ($metadata) { $metadata.ProcessName } else { $null }
+        ExecutablePath = if ($metadata) { $metadata.ExecutablePath } else { $null }
+        CommandLine = if ($metadata) { $metadata.CommandLine } else { $null }
+    }
 }
 
 function Get-PortOwnerSummary {
     param([int]$Port)
-    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $conn) { return 'free' }
-        try {
-            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction Stop
-            return "PID=$($proc.Id) Name=$($proc.ProcessName)"
-        } catch {
-            return "PID=$($conn.OwningProcess) (process lookup failed)"
-        }
+
+    $owner = Get-PortOwner -Port $Port
+    if (-not $owner) {
+        return 'free'
     }
-    $line = netstat -ano -p tcp | Select-String -Pattern "LISTENING\s+(\d+)$" | ForEach-Object { $_.Line } | Where-Object { $_ -match "[:\.]$Port\s" } | Select-Object -First 1
-    if (-not $line) { return 'free' }
-    $pid = (($line -split '\s+') | Select-Object -Last 1).Trim()
-    try {
-        $proc = Get-Process -Id ([int]$pid) -ErrorAction Stop
-        return "PID=$($proc.Id) Name=$($proc.ProcessName)"
-    } catch {
-        return "PID=$pid (process lookup failed)"
-    }
+
+    $path = if ($owner.ExecutablePath) { $owner.ExecutablePath } else { '<unknown>' }
+    return "PID=$($owner.Pid) Name=$($owner.ProcessName) Path=$path"
 }
 
-function Get-LlamaServerExe {
-    param([hashtable]$Paths)
-    $direct = Join-Path $Paths.Bin 'llama-server.exe'
-    if (Test-Path -LiteralPath $direct) { return $direct }
-    $found = Get-ChildItem -Path $Paths.Bin -Recurse -Filter 'llama-server.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found) { return $found.FullName }
-    return $null
-}
-
-function Get-LlamaReleaseAsset {
-    param([string]$LogFile)
-    $api = (Get-DefaultStackConfig).LlamaReleaseApi
-    $release = Invoke-Retry -Description 'github release query' -MaxAttempts 5 -DelaySeconds 4 -Action {
-        Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'local-llm-bootstrap' }
-    }
-    if (-not $release.assets) {
-        throw 'GitHub latest release returned no assets.'
-    }
-    $ranked = @()
-    foreach ($asset in $release.assets) {
-        $name = $asset.name
-        if ($name -notmatch '(?i)\.zip$') { continue }
-        $score = 0
-        if ($name -match '(?i)vulkan') { $score += 8 }
-        if ($name -match '(?i)win|windows') { $score += 4 }
-        if ($name -match '(?i)x64|amd64') { $score += 4 }
-        if ($name -match '(?i)cuda|metal|rocm|sycl|hipblas') { $score -= 10 }
-        if ($score -gt 0) {
-            $ranked += [pscustomobject]@{ score=$score; asset=$asset }
-        }
-    }
-    if (-not $ranked) {
-        $all = ($release.assets | ForEach-Object { $_.name }) -join ', '
-        throw "Could not find a Windows Vulkan zip asset in release $($release.tag_name). Assets seen: $all"
-    }
-    $chosen = $ranked | Sort-Object score -Descending | Select-Object -First 1
-    Write-Log -LogFile $LogFile -Message "Selected llama.cpp release tag=$($release.tag_name) asset=$($chosen.asset.name) score=$($chosen.score)"
-    return [pscustomobject]@{
-        Tag = $release.tag_name
-        Name = $chosen.asset.name
-        Url = $chosen.asset.browser_download_url
-        PublishedAt = $release.published_at
-    }
-}
-
-function Install-LlamaServer {
+function Test-ProcessMatchesBackend {
     param(
-        [hashtable]$Paths,
-        [string]$LogFile
+        [pscustomobject]$ProcessInfo,
+        [pscustomobject]$Config
     )
-    $asset = Get-LlamaReleaseAsset -LogFile $LogFile
-    $tmpRoot = Join-Path $env:TEMP 'local-llm-bootstrap'
-    $zipPath = Join-Path $tmpRoot $asset.Name
-    $extractPath = Join-Path $tmpRoot 'extract'
 
-    if (Test-Path $tmpRoot) { Remove-Item -Path $tmpRoot -Recurse -Force }
-    New-Item -ItemType Directory -Path $tmpRoot,$extractPath -Force | Out-Null
-
-    Invoke-Retry -Description 'llama.cpp download' -MaxAttempts 5 -DelaySeconds 5 -Action {
-        Invoke-WebRequest -Uri $asset.Url -OutFile $zipPath -UseBasicParsing
-    } | Out-Null
-    Invoke-Retry -Description 'llama.cpp unzip' -MaxAttempts 2 -DelaySeconds 2 -Action {
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-    } | Out-Null
-
-    if (Test-Path $Paths.Bin) { Remove-Item -Path (Join-Path $Paths.Bin '*') -Recurse -Force -ErrorAction SilentlyContinue }
-    Copy-Item -Path (Join-Path $extractPath '*') -Destination $Paths.Bin -Recurse -Force
-    $llamaExe = Get-LlamaServerExe -Paths $Paths
-    if (-not $llamaExe) {
-        throw 'llama-server.exe not found after extraction. Release asset layout likely changed. Check bootstrap.log and rerun REPAIR-STACK.ps1.'
+    if (-not $ProcessInfo) {
+        return $false
     }
-    Write-Log -LogFile $LogFile -Message "Installed llama-server.exe at $llamaExe"
-    return $llamaExe
+
+    $expectedPath = [System.IO.Path]::GetFullPath($Config.BackendBinaryPath)
+    $actualPath = $null
+    if ($ProcessInfo.ExecutablePath) {
+        try {
+            $actualPath = [System.IO.Path]::GetFullPath($ProcessInfo.ExecutablePath)
+        } catch {
+            $actualPath = $ProcessInfo.ExecutablePath
+        }
+    }
+
+    $pathMatches = ($actualPath -and $actualPath -ieq $expectedPath)
+    if (-not $pathMatches -and -not $ProcessInfo.CommandLine) {
+        return $false
+    }
+
+    $portMatches = $false
+    if ($ProcessInfo.CommandLine -and $ProcessInfo.CommandLine -match '(?i)(?:--port|-p)\s+(\d+)') {
+        $portMatches = ([int]$Matches[1] -eq [int]$Config.BackendPort)
+    }
+
+    return ($pathMatches -and ($portMatches -or -not $ProcessInfo.CommandLine))
 }
 
-function Invoke-HttpCheck {
-    param([string]$Uri,[int]$TimeoutSec=6)
-    try {
-        $resp = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec $TimeoutSec
-        return [pscustomobject]@{ Ok = $true; StatusCode = $resp.StatusCode; Body = $resp.Content }
-    } catch {
-        return [pscustomobject]@{ Ok = $false; StatusCode = 0; Body = "$($_.Exception.Message)" }
+function Get-BackendOwnership {
+    param([pscustomobject]$Config)
+
+    $portOwner = Get-PortOwner -Port ([int]$Config.BackendPort)
+    $pidFilePid = $null
+
+    if (Test-Path -LiteralPath $Config.BackendPidFile) {
+        $pidText = (Get-Content -Raw -LiteralPath $Config.BackendPidFile).Trim()
+        if ($pidText -match '^\d+$') {
+            $pidFilePid = [int]$pidText
+            $pidProcess = Get-ProcessMetadata -Pid $pidFilePid
+            if ($pidProcess -and (Test-ProcessMatchesBackend -ProcessInfo $pidProcess -Config $Config)) {
+                if (-not $portOwner -or $portOwner.Pid -eq $pidFilePid) {
+                    return [pscustomobject]@{
+                        BelongsToStack = $true
+                        Classification = 'our-backend'
+                        Source = 'pid-file'
+                        Pid = $pidProcess.Pid
+                        ProcessName = $pidProcess.ProcessName
+                        ExecutablePath = $pidProcess.ExecutablePath
+                        CommandLine = $pidProcess.CommandLine
+                        Message = 'Backend ownership confirmed by valid PID file.'
+                    }
+                }
+            }
+        }
+    }
+
+    if (-not $portOwner) {
+        return [pscustomobject]@{
+            BelongsToStack = $false
+            Classification = 'not-running'
+            Source = 'port-owner'
+            Pid = $null
+            ProcessName = $null
+            ExecutablePath = $null
+            CommandLine = $null
+            Message = 'No process owns the configured backend port.'
+        }
+    }
+
+    $ownerInfo = Get-ProcessMetadata -Pid $portOwner.Pid
+    if ($ownerInfo -and (Test-ProcessMatchesBackend -ProcessInfo $ownerInfo -Config $Config)) {
+        return [pscustomobject]@{
+            BelongsToStack = $true
+            Classification = 'our-backend'
+            Source = 'port-owner'
+            Pid = $ownerInfo.Pid
+            ProcessName = $ownerInfo.ProcessName
+            ExecutablePath = $ownerInfo.ExecutablePath
+            CommandLine = $ownerInfo.CommandLine
+            Message = 'Backend ownership confirmed by configured port and executable path.'
+        }
+    }
+
+    if ($ownerInfo -and (($ownerInfo.ProcessName -match '(?i)llama-server') -or (($ownerInfo.ExecutablePath -as [string]) -match '(?i)llama-server'))) {
+        return [pscustomobject]@{
+            BelongsToStack = $false
+            Classification = 'other-llama-server'
+            Source = 'process-name'
+            Pid = $ownerInfo.Pid
+            ProcessName = $ownerInfo.ProcessName
+            ExecutablePath = $ownerInfo.ExecutablePath
+            CommandLine = $ownerInfo.CommandLine
+            Message = 'Another llama-server owns the configured backend port.'
+        }
+    }
+
+    return [pscustomobject]@{
+        BelongsToStack = $false
+        Classification = 'unknown-port-owner'
+        Source = 'port-owner'
+        Pid = $portOwner.Pid
+        ProcessName = $portOwner.ProcessName
+        ExecutablePath = $portOwner.ExecutablePath
+        CommandLine = $portOwner.CommandLine
+        Message = 'An unknown process owns the configured backend port.'
     }
 }
 
-function Wait-HttpReady {
-    param([string]$Uri,[int]$TimeoutSec,[int]$IntervalSec=2)
+function Get-BackendStatus {
+    param([pscustomobject]$Config)
+
+    $health = Test-UrlSuccess -Url $Config.BackendHealthUrl -TimeoutSec 5
+    $models = Test-UrlSuccess -Url $Config.BackendModelsUrl -TimeoutSec 5
+    return [pscustomobject]@{
+        HealthOk = [bool]$health.Success
+        ModelsOk = [bool]$models.Success
+        Ready = ([bool]$health.Success -and [bool]$models.Success)
+        Severity = if ($health.Success -and $models.Success) { 'ready' } elseif ($health.Success -and -not $models.Success) { 'degraded' } else { 'down' }
+        HealthStatusCode = $health.StatusCode
+        ModelsStatusCode = $models.StatusCode
+        HealthError = $health.Error
+        ModelsError = $models.Error
+    }
+}
+
+function Wait-ForBackendReady {
+    param(
+        [pscustomobject]$Config,
+        [int]$TimeoutSec
+    )
+
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
-        $result = Invoke-HttpCheck -Uri $Uri -TimeoutSec 5
-        if ($result.Ok -and $result.StatusCode -ge 200 -and $result.StatusCode -lt 500) { return $true }
-        Start-Sleep -Seconds $IntervalSec
-    }
-    return $false
-}
-
-function Select-GPUIndex {
-    param([string]$LlamaServerExe,[hashtable]$Paths,[hashtable]$Config,[string]$LogFile)
-    if ($Config.GPUIndexOverride -ne '') {
-        Set-Content -Path $Paths.GPUState -Value "$($Config.GPUIndexOverride)" -Encoding ASCII
-        Write-Log -LogFile $LogFile -Message "Using GPUIndexOverride=$($Config.GPUIndexOverride)"
-        return [int]$Config.GPUIndexOverride
-    }
-    $raw = & $LlamaServerExe --list-devices 2>&1
-    $raw | Set-Content -Path $Paths.DevicesRaw -Encoding UTF8
-    $lines = @($raw | ForEach-Object { "$_" })
-    $candidates = @()
-    for ($i=0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        $idx = $null
-        if ($line -match '(?i)device\s*#?\s*(\d+)') { $idx = [int]$Matches[1] }
-        elseif ($line -match '^\s*(\d+)\s*[:\-]') { $idx = [int]$Matches[1] }
-        elseif ($line -match '\[(\d+)\]') { $idx = [int]$Matches[1] }
-        if ($null -ne $idx) {
-            $score = 0
-            if ($line -match '(?i)5700\s*xt|navi10') { $score += 20 }
-            if ($line -match '(?i)amd|radeon') { $score += 10 }
-            if ($line -match '(?i)vulkan') { $score += 3 }
-            $candidates += [pscustomobject]@{ Index=$idx; Score=$score; Line=$line; Order=$i }
+        $status = Get-BackendStatus -Config $Config
+        if ($status.Ready) {
+            return $status
         }
+        Start-Sleep -Seconds 2
     }
-    if (-not $candidates) {
-        Write-Log -Level 'WARN' -LogFile $LogFile -Message 'Could not parse --list-devices output. Defaulting GPU index to 0.'
-        Set-Content -Path $Paths.GPUState -Value '0' -Encoding ASCII
-        return 0
-    }
-    $selected = $candidates | Sort-Object Score -Descending,Order | Select-Object -First 1
-    $sameTop = $candidates | Where-Object { $_.Score -eq $selected.Score }
-    if ($sameTop.Count -gt 1) {
-        Write-Log -Level 'WARN' -LogFile $LogFile -Message "GPU selection ambiguous. Top score=$($selected.Score). Deterministically selecting first listed index=$($selected.Index)."
-    }
-    Set-Content -Path $Paths.GPUState -Value "$($selected.Index)" -Encoding ASCII
-    Write-Log -LogFile $LogFile -Message "Selected GPU index=$($selected.Index) from line: $($selected.Line)"
-    return $selected.Index
+
+    return (Get-BackendStatus -Config $Config)
 }
 
-function Get-GPUIndex {
-    param([hashtable]$Paths)
-    if (Test-Path -LiteralPath $Paths.GPUState) {
-        $raw = (Get-Content -Path $Paths.GPUState -Raw).Trim()
-        if ($raw -match '^\d+$') { return [int]$raw }
-    }
-    return 0
-}
+function Stop-StackBackendProcess {
+    param([pscustomobject]$Config)
 
-function Ensure-DockerAvailable {
-    param([string]$LogFile)
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        throw 'Docker CLI not found in PATH. Install Docker Desktop and rerun setup.'
+    $ownership = Get-BackendOwnership -Config $Config
+    if (-not $ownership.BelongsToStack) {
+        return $false
     }
-    $null = Invoke-Retry -Description 'docker engine check' -MaxAttempts 10 -DelaySeconds 3 -Action {
-        docker version | Out-Null
-        return $true
-    }
-    Write-Log -LogFile $LogFile -Message 'Docker CLI and engine are reachable.'
-}
 
-function Write-LaunchersFromRepo {
-    param([string]$RepoRoot,[hashtable]$Paths)
-    $names = @(
-        'stack-common.ps1',
-        'START-STACK.cmd','STOP-STACK.cmd','START-BACKEND.cmd','STOP-BACKEND.cmd','START-OPENWEBUI.cmd',
-        'STOP-OPENWEBUI.cmd','STATUS-STACK.cmd','TEST-API.cmd','REPAIR-STACK.ps1','REMOVE-STACK.ps1','status-stack.ps1',
-        'test-api.ps1','start-backend.ps1','stop-backend.ps1','start-openwebui.ps1','stop-openwebui.ps1','start-stack.ps1','stop-stack.ps1'
-    )
-    foreach ($name in $names) {
-        $src = Join-Path (Join-Path $RepoRoot 'scripts') $name
-        if (Test-Path -LiteralPath $src) {
-            Copy-Item -Path $src -Destination (Join-Path $Paths.Scripts $name) -Force
-        }
-    }
-}
-
-function Get-BackendPidFilePath {
-    param([hashtable]$Paths,[hashtable]$Config)
-    return Join-Path $Paths.State $Config.BackendPidFileName
-}
-
-function Write-DesktopShortcuts {
-    param([hashtable]$Paths,[string]$LogFile)
     try {
-        $desktop = [Environment]::GetFolderPath('Desktop')
-        $shell = New-Object -ComObject WScript.Shell
-        $defs = @(
-            @{ Name='Local LLM Start Stack.lnk'; Target=(Join-Path $Paths.Scripts 'START-STACK.cmd') },
-            @{ Name='Local LLM Stop Stack.lnk'; Target=(Join-Path $Paths.Scripts 'STOP-STACK.cmd') },
-            @{ Name='Local LLM Status.lnk'; Target=(Join-Path $Paths.Scripts 'STATUS-STACK.cmd') }
-        )
-        foreach ($d in $defs) {
-            $lnk = $shell.CreateShortcut((Join-Path $desktop $d.Name))
-            $lnk.TargetPath = $d.Target
-            $lnk.WorkingDirectory = $Paths.Scripts
-            $lnk.Save()
-        }
+        Stop-Process -Id $ownership.Pid -Force -ErrorAction Stop
     } catch {
-        Write-Log -Level 'WARN' -LogFile $LogFile -Message "Shortcut creation failed: $($_.Exception.Message)"
+        return $false
     }
+
+    Start-Sleep -Seconds 2
+    if (Test-Path -LiteralPath $Config.BackendPidFile) {
+        Remove-Item -LiteralPath $Config.BackendPidFile -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+function Get-OpenWebUiFingerprintInputs {
+    param([pscustomobject]$Config)
+
+    return [ordered]@{
+        DockerImage = $Config.DockerImage
+        ContainerName = $Config.ContainerName
+        ServiceName = $Config.OpenWebUiServiceName
+        FrontendHost = $Config.FrontendHost
+        FrontendPort = $Config.FrontendPort
+        BackendPort = $Config.BackendPort
+        OpenWebUiAuthEnabled = [bool]$Config.OpenWebUiAuthEnabled
+        OpenWebUiDataDir = $Config.OpenWebUiDataDir
+        BackendApiBaseUrl = $Config.BackendApiBaseUrl
+        OpenAiApiKey = $Config.OpenAiApiKey
+        GlobalLogLevel = $Config.GlobalLogLevel
+    }
+}
+
+function Get-OpenWebUiComposeContent {
+    param(
+        [pscustomobject]$Config,
+        [string]$Fingerprint
+    )
+
+    $dataDirForDocker = $Config.OpenWebUiDataDir -replace '\\', '/'
+    $authValue = if ($Config.OpenWebUiAuthEnabled) { 'true' } else { 'false' }
+
+    return @"
+services:
+  $($Config.OpenWebUiServiceName):
+    image: $($Config.DockerImage)
+    container_name: $($Config.ContainerName)
+    restart: unless-stopped
+    ports:
+      - "$($Config.FrontendHost):$($Config.FrontendPort):8080"
+    environment:
+      - OPENAI_API_BASE_URL=$($Config.BackendApiBaseUrl)
+      - OPENAI_API_KEY=$($Config.OpenAiApiKey)
+      - WEBUI_AUTH=$authValue
+      - GLOBAL_LOG_LEVEL=$($Config.GlobalLogLevel)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      - "localllm.openwebui.config-fingerprint=$Fingerprint"
+    volumes:
+      - "${dataDirForDocker}:/app/backend/data"
+"@
+}
+
+function Get-OpenWebUiContainerState {
+    param([pscustomobject]$Config)
+
+    if (-not (Test-DockerDaemonReachable)) {
+        return [pscustomobject]@{
+            Exists = $false
+            Running = $false
+            Status = 'docker-unavailable'
+            HealthStatus = $null
+            Image = $null
+            Labels = @{}
+        }
+    }
+
+    $inspectOutput = & docker inspect $Config.ContainerName 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $inspectOutput) {
+        return [pscustomobject]@{
+            Exists = $false
+            Running = $false
+            Status = 'missing'
+            HealthStatus = $null
+            Image = $null
+            Labels = @{}
+        }
+    }
+
+    $inspect = ($inspectOutput | ConvertFrom-Json)[0]
+    $healthStatus = $null
+    if ($inspect.State.PSObject.Properties.Name -contains 'Health' -and $inspect.State.Health) {
+        $healthStatus = $inspect.State.Health.Status
+    }
+
+    return [pscustomobject]@{
+        Exists = $true
+        Running = [bool]$inspect.State.Running
+        Status = [string]$inspect.State.Status
+        HealthStatus = $healthStatus
+        Image = [string]$inspect.Config.Image
+        Labels = if ($inspect.Config.Labels) { $inspect.Config.Labels } else { @{} }
+    }
+}
+
+function Get-OpenWebUiDriftStatus {
+    param([pscustomobject]$Config)
+
+    $currentFingerprint = Get-JsonHash -Object (Get-OpenWebUiFingerprintInputs -Config $Config)
+    $storedFingerprint = $null
+    if (Test-Path -LiteralPath $Config.OpenWebUiFingerprintFile) {
+        $storedFingerprint = (Get-Content -Raw -LiteralPath $Config.OpenWebUiFingerprintFile).Trim()
+    }
+
+    $container = Get-OpenWebUiContainerState -Config $Config
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($storedFingerprint -and $storedFingerprint -ne $currentFingerprint) {
+        $reasons.Add("stored fingerprint $storedFingerprint does not match current fingerprint $currentFingerprint")
+    }
+
+    if ($container.Exists) {
+        if ($container.Image -ne $Config.DockerImage) {
+            $reasons.Add("container image '$($container.Image)' does not match expected image '$($Config.DockerImage)'")
+        }
+
+        $containerFingerprint = $container.Labels['localllm.openwebui.config-fingerprint']
+        if (-not $containerFingerprint) {
+            $reasons.Add('container fingerprint label is missing')
+        } elseif ($containerFingerprint -ne $currentFingerprint) {
+            $reasons.Add("container fingerprint $containerFingerprint does not match current fingerprint $currentFingerprint")
+        }
+    }
+
+    return [pscustomobject]@{
+        Fingerprint = $currentFingerprint
+        StoredFingerprint = $storedFingerprint
+        ContainerState = $container
+        DriftReasons = $reasons
+        DriftDetected = ($reasons.Count -gt 0)
+    }
+}
+
+function Get-ConfiguredLocalModelStatus {
+    param([pscustomobject]$Config)
+
+    return [pscustomobject]@{
+        Path = $Config.LocalModelPath
+        Exists = (Test-Path -LiteralPath $Config.LocalModelPath)
+    }
+}
+
+function Deploy-RepoScripts {
+    param(
+        [string]$RepoScriptsDir,
+        [string]$InstallScriptsDir
+    )
+
+    New-Item -ItemType Directory -Force -Path $InstallScriptsDir | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $RepoScriptsDir -File) {
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $InstallScriptsDir $file.Name) -Force
+    }
+}
+
+function Write-CmdWrapper {
+    param(
+        [string]$Path,
+        [string]$PowerShellArguments
+    )
+
+    @"
+@echo off
+powershell -ExecutionPolicy Bypass $PowerShellArguments
+"@ | Set-Content -Path $Path -Encoding ASCII
 }

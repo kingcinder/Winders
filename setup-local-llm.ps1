@@ -2,6 +2,11 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 . (Join-Path $PSScriptRoot 'scripts\stack-common.ps1')
 
+Assert-SupportedPlatform
+if (-not (Test-IsAdmin)) {
+    throw 'Administrator rights are required to install under C:\LocalLLM. Re-run in elevated PowerShell.'
+}
+
 $config = Load-StackConfig
 $configHash = ConvertTo-Hashtable -InputObject $config
 $config = Resolve-StackConfig -Config $configHash
@@ -255,7 +260,8 @@ foreach ($shortcut in @(
     @{ Name = 'Local LLM - Models Folder GGUF.lnk'; Target = Join-Path $config.ScriptsDir 'START-MODELS-DIR.cmd' },
     @{ Name = 'Local LLM - Start Stack.lnk'; Target = Join-Path $config.ScriptsDir 'START-STACK.cmd' },
     @{ Name = 'Local LLM - Repair Stack.lnk'; Target = Join-Path $config.ScriptsDir 'REPAIR-STACK.cmd' },
-    @{ Name = 'Local LLM - Status Stack.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-STACK.cmd' }
+    @{ Name = 'Local LLM - Status Stack.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-STACK.cmd' },
+    @{ Name = 'Local LLM - Self Test.lnk'; Target = $selfTestCmd }
 )) {
     $sc = $wsh.CreateShortcut((Join-Path $desktop $shortcut.Name))
     $sc.TargetPath = $shortcut.Target
@@ -266,5 +272,6 @@ foreach ($shortcut in @(
 Write-Ok 'Install complete.'
 Write-Host ''
 Write-Host 'Next step:' -ForegroundColor Cyan
-Write-Host "  Run: $($config.ScriptsDir)\START-QWEN-SMOKETEST.cmd" -ForegroundColor White
-Write-Host 'Then open: http://127.0.0.1:8080' -ForegroundColor White
+Write-Host "  Run: $($config.ScriptsDir)\START-STACK.cmd" -ForegroundColor White
+Write-Host "Then check: $selfTestCmd" -ForegroundColor White
+Write-Host "UI URL: $($config.FrontendUrl)" -ForegroundColor White

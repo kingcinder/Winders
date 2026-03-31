@@ -1,54 +1,60 @@
-param([switch]$NonInteractive)
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot = Split-Path -Parent $ScriptRoot
-. (Join-Path $ScriptRoot 'stack-common.ps1')
+. (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$configPath = Resolve-StackConfigPath -ScriptRoot $ScriptRoot -RepoRoot $RepoRoot
-$config = Load-StackConfig -ConfigPath $configPath
-$paths = Get-StackPaths -Config $config
-Ensure-StackDirectories -Paths $paths
-$config | ConvertTo-Json -Depth 8 | Set-Content -Path $paths.ConfigFile -Encoding UTF8
+$config = Load-StackConfig
+Validate-StackConfig -Config $config
+Ensure-StackDirectories -Config $config
 
-Write-Log -LogFile $paths.BootstrapLog -Message 'Running deterministic repair flow.'
-
-$llama = Get-LlamaServerExe -Paths $paths
-if (-not $llama) {
-    Write-Log -LogFile $paths.BootstrapLog -Level 'WARN' -Message 'Backend binary missing; installing latest Vulkan llama.cpp release.'
-    $llama = Install-LlamaServer -Paths $paths -LogFile $paths.BootstrapLog
+function Fail-Repair {
+    param([string]$Message)
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'ERROR' -Message $Message
+    exit 1
 }
 
-$null = Select-GPUIndex -LlamaServerExe $llama -Paths $paths -Config $config -LogFile $paths.BootstrapLog
-
-if (Test-TcpPortInUse -Port ([int]$config.BackendPort)) {
-    $owner = Get-PortOwnerSummary -Port ([int]$config.BackendPort)
-    if ($owner -notmatch 'llama-server') { throw "Repair abort: backend port occupied by $owner" }
-}
-if (Test-TcpPortInUse -Port ([int]$config.FrontendPort)) {
-    $owner = Get-PortOwnerSummary -Port ([int]$config.FrontendPort)
-    if ($owner -notmatch 'docker|com\.docker|open-webui') { throw "Repair abort: frontend port occupied by $owner" }
+if (-not (Test-Path -LiteralPath $config.BackendBinaryPath)) {
+    Fail-Repair "Backend binary missing at '$($config.BackendBinaryPath)'. Rerun setup-local-llm.ps1."
 }
 
-if (-not (Wait-HttpReady -Uri "http://$($config.BackendHost):$($config.BackendPort)/health" -TimeoutSec 5)) {
-    & (Join-Path $ScriptRoot 'stop-backend.ps1')
-    try {
-        & (Join-Path $ScriptRoot 'start-backend.ps1')
-    } catch {
-        Write-Log -LogFile $paths.BootstrapLog -Level 'WARN' -Message 'Local model start failed; attempting smoke-test backend.'
-        & (Join-Path $ScriptRoot 'start-backend.ps1') -SmokeTest
+$backendOwnership = Get-BackendOwnership -Config $config
+$backendStatus = Get-BackendStatus -Config $config
+if ($backendOwnership.Classification -in @('other-llama-server', 'unknown-port-owner')) {
+    $ownerPath = if ($backendOwnership.ExecutablePath) { $backendOwnership.ExecutablePath } else { '<unknown>' }
+    Fail-Repair "Backend port conflict on $($config.BackendPort): PID $($backendOwnership.Pid), process '$($backendOwnership.ProcessName)', executable '$ownerPath'."
+}
+
+if ($backendStatus.Ready) {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'OK' -Message 'Backend already healthy. Leaving it alone.'
+} else {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'WARN' -Message "Backend not ready. /health=$($backendStatus.HealthOk), /v1/models=$($backendStatus.ModelsOk). Repairing backend only."
+    & (Join-Path $PSScriptRoot 'start-backend.ps1') -ModePreference 'auto' -StartReason 'repair-backend'
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Repair 'Backend repair failed.'
     }
 }
 
-Ensure-DockerAvailable -LogFile $paths.OpenWebUILog
-& (Join-Path $ScriptRoot 'stop-openwebui.ps1')
-& (Join-Path $ScriptRoot 'start-openwebui.ps1')
+if (-not (Test-DockerCliAvailable)) {
+    Fail-Repair 'Docker CLI not found.'
+}
+if (-not (Test-DockerDaemonReachable)) {
+    Fail-Repair 'Docker daemon not reachable.'
+}
 
-$backendHealth = Invoke-HttpCheck -Uri "http://$($config.BackendHost):$($config.BackendPort)/health"
-$backendModels = Invoke-HttpCheck -Uri "http://$($config.BackendHost):$($config.BackendPort)/v1/models"
-$ui = Invoke-HttpCheck -Uri "http://$($config.FrontendHost):$($config.FrontendPort)"
-if (-not $backendHealth.Ok) { throw 'Repair failed: backend /health not responding.' }
-if (-not $backendModels.Ok) { throw 'Repair failed: backend /v1/models not responding.' }
-if (-not $ui.Ok) { throw 'Repair failed: frontend UI not reachable.' }
-Write-Log -LogFile $paths.BootstrapLog -Message 'Repair flow succeeded.'
+$frontendDrift = Get-OpenWebUiDriftStatus -Config $config
+$uiReachable = (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success
+if ($frontendDrift.ContainerState.Exists -and $frontendDrift.ContainerState.Running -and -not $frontendDrift.DriftDetected -and $frontendDrift.ContainerState.HealthStatus -ne 'unhealthy' -and $uiReachable) {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'OK' -Message 'Open WebUI already healthy. Leaving it alone.'
+} else {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'WARN' -Message 'Open WebUI is broken, drifted, or unreachable. Repairing UI only.'
+    & (Join-Path $PSScriptRoot 'start-openwebui.ps1') -StartReason 'repair-openwebui'
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Repair 'Open WebUI repair failed.'
+    }
+}
+
+$finalBackend = Get-BackendStatus -Config $config
+$finalUi = (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success
+if (-not $finalBackend.Ready -or -not $finalUi) {
+    Fail-Repair "Repair completed with unresolved issues. backendReady=$($finalBackend.Ready), uiReachable=$finalUi."
+}
+
+Write-StackLog -Config $config -Component 'REPAIR' -Level 'OK' -Message 'Stack repair completed successfully.'
