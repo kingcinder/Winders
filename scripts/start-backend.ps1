@@ -56,7 +56,8 @@ function Start-BackendProcess {
         $actualModel = $config.SmokeTestModelRepo
     }
 
-    foreach ($item in @('--host', $config.BackendHost, '--port', [string]$config.BackendPort, '-c', [string]$config.ContextLength, '-ngl', 'auto', '-sm', 'none', '-mg', [string]$gpuIndex, '-fit', 'on', '-fa', 'auto')) {
+    $gpuLayersValue = if ([string]::IsNullOrWhiteSpace([string]$config.GPULayers)) { 'auto' } else { [string]$config.GPULayers }
+    foreach ($item in @('--host', $config.BackendHost, '--port', [string]$config.BackendPort, '-c', [string]$config.ContextLength, '-ngl', $gpuLayersValue, '-sm', 'none', '-mg', [string]$gpuIndex, '-fit', 'on', '-fa', 'auto')) {
         $arguments.Add($item)
     }
 
