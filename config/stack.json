@@ -1,0 +1,23 @@
+{
+  "InstallRoot": "C:\\LocalLLM",
+  "BackendHost": "127.0.0.1",
+  "BackendPort": 8080,
+  "FrontendHost": "127.0.0.1",
+  "FrontendPort": 3000,
+  "ContextLength": 4096,
+  "GPULayers": "auto",
+  "GPUIndexOverride": "",
+  "AutoOpenBrowser": true,
+  "DisableWebUIAuth": true,
+  "SmokeTestRepo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+  "SmokeTestFile": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "LocalModelPath": "C:\\LocalLLM\\models\\model.gguf",
+  "BackendHealthTimeoutSec": 120,
+  "UIHealthTimeoutSec": 120,
+  "DockerImage": "ghcr.io/open-webui/open-webui:main",
+  "ContainerName": "open-webui-local",
+  "BackendPidFileName": "backend.pid",
+  "BackendStdOutLogName": "backend-stdout.log",
+  "BackendStdErrLogName": "backend-stderr.log",
+  "LlamaReleaseApi": "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+}
