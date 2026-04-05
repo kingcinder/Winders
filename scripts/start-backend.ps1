@@ -34,6 +34,25 @@ function Get-GpuIndex {
     return [int]$value
 }
 
+function Test-BackendMatchesRequest {
+    param(
+        [pscustomobject]$State,
+        [ValidateSet('local', 'smoke-test')]
+        [string]$Mode
+    )
+
+    if ($State.BackendMode -ne $Mode) {
+        return $false
+    }
+
+    if ($Mode -eq 'local') {
+        return ([string]$State.LastModelActuallyUsed -eq [string]$config.LocalModelPath)
+    }
+
+    $expectedSmokeModel = "$($config.SmokeTestModelRepo)/$($config.SmokeTestFile)"
+    return ([string]$State.LastModelActuallyUsed -eq $expectedSmokeModel)
+}
+
 function Start-BackendProcess {
     param(
         [ValidateSet('local', 'smoke-test')]
@@ -104,34 +123,6 @@ if (-not $ownership.BelongsToStack -and $ownership.Classification -in @('other-l
     Fail-Backend "Configured backend port $($config.BackendPort) is occupied by PID $($ownership.Pid), process '$($ownership.ProcessName)', executable '$ownerPath'."
 }
 
-$currentStatus = Get-BackendStatus -Config $config
-if ($ownership.BelongsToStack -and $currentStatus.Ready) {
-    Write-StackState -Config $config -Updates @{
-        LastStartReason = $StartReason
-        LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
-    }
-    Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Reusing existing backend. /health and /v1/models both passed.'
-    exit 0
-}
-
-if ($ownership.BelongsToStack) {
-    Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message 'Existing stack backend is not yet ready. Waiting before restart to avoid bouncing a warming process.'
-    $waitStatus = Wait-ForBackendReady -Config $config -TimeoutSec $config.StartupTimeoutSec
-    if ($waitStatus.Ready) {
-        Write-StackState -Config $config -Updates @{
-            LastStartReason = $StartReason
-            LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
-        }
-        Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Existing backend became ready during wait. Reusing it.'
-        exit 0
-    }
-
-    Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message "Existing stack backend is not ready. /health=$($waitStatus.HealthOk), /v1/models=$($waitStatus.ModelsOk). Restarting backend only."
-    if (-not (Stop-StackBackendProcess -Config $config)) {
-        Fail-Backend 'Failed to stop unhealthy backend owned by this stack.'
-    }
-}
-
 $localModel = Get-ConfiguredLocalModelStatus -Config $config
 $fallbackTriggered = $false
 $fallbackRequestedModel = $null
@@ -148,6 +139,53 @@ if ($effectiveMode -eq 'local' -and -not $localModel.Exists) {
     $fallbackTriggered = $true
     $fallbackRequestedModel = $config.LocalModelPath
     $effectiveMode = 'smoke-test'
+}
+
+$state = Read-StackState -Config $config
+$currentStatus = Get-BackendStatus -Config $config
+if ($ownership.BelongsToStack -and $currentStatus.Ready) {
+    if (Test-BackendMatchesRequest -State $state -Mode $effectiveMode) {
+        Write-StackState -Config $config -Updates @{
+            LastStartReason = $StartReason
+            LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+        }
+        Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Reusing existing backend. /health and /v1/models both passed.'
+        exit 0
+    }
+
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message "Existing healthy backend does not match requested mode '$effectiveMode'. Restarting backend only."
+    if (-not (Stop-StackBackendProcess -Config $config)) {
+        Fail-Backend 'Failed to stop stack-owned backend that did not match the requested mode.'
+    }
+    $ownership = [pscustomobject]@{
+        BelongsToStack = $false
+    }
+}
+
+if ($ownership.BelongsToStack) {
+    Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message 'Existing stack backend is not yet ready. Waiting before restart to avoid bouncing a warming process.'
+    $waitStatus = Wait-ForBackendReady -Config $config -TimeoutSec $config.StartupTimeoutSec
+    if ($waitStatus.Ready) {
+        $state = Read-StackState -Config $config
+        if (Test-BackendMatchesRequest -State $state -Mode $effectiveMode) {
+            Write-StackState -Config $config -Updates @{
+                LastStartReason = $StartReason
+                LastSuccessfulBackendReadyAt = (Get-Date).ToString('o')
+            }
+            Write-StackLog -Config $config -Component 'BACKEND' -Level 'OK' -Message 'Existing backend became ready during wait. Reusing it.'
+            exit 0
+        }
+
+        Write-StackLog -Config $config -Component 'BACKEND' -Level 'INFO' -Message "Existing backend became ready but does not match requested mode '$effectiveMode'. Restarting backend only."
+        if (-not (Stop-StackBackendProcess -Config $config)) {
+            Fail-Backend 'Failed to stop stack-owned backend that became ready with the wrong mode.'
+        }
+    } else {
+        Write-StackLog -Config $config -Component 'BACKEND' -Level 'WARN' -Message "Existing stack backend is not ready. /health=$($waitStatus.HealthOk), /v1/models=$($waitStatus.ModelsOk). Restarting backend only."
+        if (-not (Stop-StackBackendProcess -Config $config)) {
+            Fail-Backend 'Failed to stop unhealthy backend owned by this stack.'
+        }
+    }
 }
 
 $result = Start-BackendProcess -Mode $effectiveMode -StartReasonText $StartReason

@@ -39,6 +39,11 @@ Self-test:
 powershell -ExecutionPolicy Bypass -File C:\LocalLLM\scripts\SELF-TEST-STACK.ps1
 ```
 
+Local model selection:
+
+- `START-LOCAL-MODEL.cmd` prompts for a local GGUF and now enumerates `C:\LocalLLM\models` first.
+- `START-MODELS-DIR.cmd` uses that same selector, so the canonical local model folder is `C:\LocalLLM\models`.
+
 ## Behavior guarantees
 
 - Backend success requires both `/health` and `/v1/models`.

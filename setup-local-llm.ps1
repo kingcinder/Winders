@@ -278,7 +278,7 @@ powershell -ExecutionPolicy Bypass -File "$($config.ScriptsDir)\select-local-mod
 
 $startLocalFixed = @"
 @echo off
-powershell -ExecutionPolicy Bypass -File "$($config.ScriptsDir)\start-backend.ps1" -ModePreference local -StartReason models-dir
+powershell -ExecutionPolicy Bypass -File "$($config.ScriptsDir)\select-local-model.ps1"
 "@
 
 $apiTest = @"
