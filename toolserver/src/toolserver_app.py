@@ -361,12 +361,19 @@ def get_effective_linux_tool_command(tool_name: str) -> str:
 KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
     {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
+    {"operation_id": "kali_run_host", "tool": "host", "purpose": "DNS lookup using the host CLI."},
+    {"operation_id": "kali_run_nslookup", "tool": "nslookup", "purpose": "DNS lookup using the nslookup CLI."},
     {"operation_id": "kali_run_curl", "tool": "curl", "purpose": "HTTP fetch with explicit method, redirect, and TLS verification options."},
+    {"operation_id": "kali_run_wget", "tool": "wget", "purpose": "HTTP fetch using wget with spider and redirect controls."},
     {"operation_id": "kali_run_whatweb", "tool": "whatweb", "purpose": "Web stack fingerprinting and technology detection."},
+    {"operation_id": "kali_run_wafw00f", "tool": "wafw00f", "purpose": "WAF detection against a specific URL."},
     {"operation_id": "kali_run_nikto", "tool": "nikto", "purpose": "Web server misconfiguration and known issue scan."},
     {"operation_id": "kali_run_wapiti", "tool": "wapiti", "purpose": "Web application assessment crawler and vuln checks."},
     {"operation_id": "kali_run_nmap", "tool": "nmap", "purpose": "Host and service enumeration with bounded options."},
+    {"operation_id": "kali_run_traceroute", "tool": "traceroute", "purpose": "Route tracing with bounded hops and probe counts."},
+    {"operation_id": "kali_run_fping", "tool": "fping", "purpose": "Reachability probe for one or more hosts."},
     {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
+    {"operation_id": "kali_run_sslyze", "tool": "sslyze", "purpose": "TLS and HTTP header analysis using SSLyze."},
     {"operation_id": "kali_run_httpx", "tool": "httpx", "purpose": "HTTPX client request wrapper for the Kali-installed CLI variant."},
     {"operation_id": "kali_run_dnsenum", "tool": "dnsenum", "purpose": "Domain DNS enumeration."},
     {"operation_id": "kali_run_dnsrecon", "tool": "dnsrecon", "purpose": "DNS reconnaissance for a domain."},
@@ -502,6 +509,20 @@ class KaliDigRequest(BaseModel):
     timeout_sec: int = Field(60, ge=1, le=600)
 
 
+class KaliHostRequest(BaseModel):
+    name: str
+    record_type: str = "A"
+    dns_server: str | None = None
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliNslookupRequest(BaseModel):
+    name: str
+    query_type: str = "A"
+    dns_server: str | None = None
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
 class KaliCurlRequest(BaseModel):
     url: str
     method: Literal["GET", "HEAD"] = "GET"
@@ -511,9 +532,25 @@ class KaliCurlRequest(BaseModel):
     timeout_sec: int = Field(60, ge=1, le=600)
 
 
+class KaliWgetRequest(BaseModel):
+    url: str
+    spider: bool = True
+    server_response: bool = True
+    follow_redirects: bool = True
+    verify_tls: bool = True
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
 class KaliWhatwebRequest(BaseModel):
     url: str
     aggression: int = Field(1, ge=1, le=4)
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliWafw00fRequest(BaseModel):
+    url: str
+    find_all: bool = False
+    no_redirect: bool = False
     timeout_sec: int = Field(120, ge=1, le=1800)
 
 
@@ -538,10 +575,39 @@ class KaliNmapRequest(BaseModel):
     timeout_sec: int = Field(300, ge=1, le=3600)
 
 
+class KaliTracerouteRequest(BaseModel):
+    host: str
+    method: Literal["udp", "tcp", "icmp"] = "udp"
+    max_hops: int = Field(10, ge=1, le=64)
+    queries: int = Field(1, ge=1, le=5)
+    port: int | None = Field(None, ge=1, le=65535)
+    numeric: bool = True
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliFpingRequest(BaseModel):
+    targets: list[str]
+    count: int = Field(1, ge=1, le=10)
+    timeout_ms: int = Field(500, ge=50, le=10000)
+    show_alive: bool = False
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
 class KaliSslscanRequest(BaseModel):
     host: str
     port: int = Field(443, ge=1, le=65535)
     timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliSslyzeRequest(BaseModel):
+    target: str
+    sni: str | None = None
+    certinfo: bool = True
+    http_headers: bool = True
+    tlsv1_2: bool = True
+    tlsv1_3: bool = True
+    mozilla_config: Literal["modern", "intermediate", "old", "disable"] = "disable"
+    timeout_sec: int = Field(240, ge=1, le=1800)
 
 
 class KaliHttpxRequest(BaseModel):
@@ -994,6 +1060,28 @@ def kali_run_dig(request: KaliDigRequest) -> dict[str, Any]:
     return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_host", operation_id="kali_run_host")
+def kali_run_host(request: KaliHostRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("host")
+    name = ensure_safe_target_value(request.name, "name")
+    record_type = ensure_safe_target_value(request.record_type.upper(), "record_type")
+    argv = [tool, "-t", record_type, name]
+    if request.dns_server:
+        argv.append(ensure_safe_target_value(request.dns_server, "dns_server"))
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_nslookup", operation_id="kali_run_nslookup")
+def kali_run_nslookup(request: KaliNslookupRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("nslookup")
+    name = ensure_safe_target_value(request.name, "name")
+    query_type = ensure_safe_target_value(request.query_type.upper(), "query_type")
+    argv = [tool, "-type=" + query_type, name]
+    if request.dns_server:
+        argv.append(ensure_safe_target_value(request.dns_server, "dns_server"))
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_curl", operation_id="kali_run_curl")
 def kali_run_curl(request: KaliCurlRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("curl")
@@ -1011,11 +1099,40 @@ def kali_run_curl(request: KaliCurlRequest) -> dict[str, Any]:
     return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_wget", operation_id="kali_run_wget")
+def kali_run_wget(request: KaliWgetRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("wget")
+    url = ensure_safe_target_value(request.url, "url")
+    argv = [tool, "--timeout", str(request.timeout_sec), "-O", "-"]
+    if request.spider:
+        argv.extend(["--spider", "-S"])
+    elif request.server_response:
+        argv.append("--server-response")
+    if not request.follow_redirects:
+        argv.append("--max-redirect=0")
+    if not request.verify_tls:
+        argv.append("--no-check-certificate")
+    argv.append(url)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_whatweb", operation_id="kali_run_whatweb")
 def kali_run_whatweb(request: KaliWhatwebRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("whatweb")
     url = ensure_safe_target_value(request.url, "url")
     return run_linux_command([tool, f"--aggression={request.aggression}", url], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_wafw00f", operation_id="kali_run_wafw00f")
+def kali_run_wafw00f(request: KaliWafw00fRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("wafw00f")
+    url = ensure_safe_target_value(request.url, "url")
+    argv = [tool, url, "--no-colors", "-T", str(request.timeout_sec)]
+    if request.find_all:
+        argv.append("-a")
+    if request.no_redirect:
+        argv.append("-r")
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
 
 
 @app.post("/tools/kali_run_nikto", operation_id="kali_run_nikto")
@@ -1035,6 +1152,38 @@ def kali_run_wapiti(request: KaliWapitiRequest) -> dict[str, Any]:
         timeout_sec=request.timeout_sec,
         require_zero_exit=True,
     )
+
+
+@app.post("/tools/kali_run_traceroute", operation_id="kali_run_traceroute")
+def kali_run_traceroute(request: KaliTracerouteRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("traceroute")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool, "-m", str(request.max_hops), "-q", str(request.queries)]
+    if request.numeric:
+        argv.append("-n")
+    if request.method == "tcp":
+        argv.append("-T")
+    elif request.method == "icmp":
+        argv.append("-I")
+    else:
+        argv.append("-U")
+    if request.port:
+        argv.extend(["-p", str(request.port)])
+    argv.append(host)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_fping", operation_id="kali_run_fping")
+def kali_run_fping(request: KaliFpingRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("fping")
+    if not request.targets:
+        raise HTTPException(status_code=400, detail="targets must contain at least one host.")
+    targets = [ensure_safe_target_value(target, "targets item") for target in request.targets]
+    argv = [tool, "-c", str(request.count), "-t", str(request.timeout_ms)]
+    if request.show_alive:
+        argv.append("-a")
+    argv.extend(targets)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
 @app.post("/tools/kali_run_nmap", operation_id="kali_run_nmap")
@@ -1059,6 +1208,29 @@ def kali_run_sslscan(request: KaliSslscanRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("sslscan")
     host = ensure_safe_target_value(request.host, "host")
     return run_linux_command([tool, f"{host}:{request.port}"], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_sslyze", operation_id="kali_run_sslyze")
+def kali_run_sslyze(request: KaliSslyzeRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("sslyze")
+    target = ensure_safe_target_value(request.target, "target")
+    argv = [tool]
+    if request.sni:
+        argv.extend(["--sni", ensure_safe_target_value(request.sni, "sni")])
+    if request.mozilla_config != "disable":
+        argv.extend(["--mozilla_config", request.mozilla_config])
+    else:
+        argv.extend(["--mozilla_config", "disable"])
+    if request.certinfo:
+        argv.append("--certinfo")
+    if request.http_headers:
+        argv.append("--http_headers")
+    if request.tlsv1_2:
+        argv.append("--tlsv1_2")
+    if request.tlsv1_3:
+        argv.append("--tlsv1_3")
+    argv.append(target)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
 @app.post("/tools/kali_run_httpx", operation_id="kali_run_httpx")
