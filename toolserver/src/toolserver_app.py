@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -301,6 +302,18 @@ def ensure_linux_file_exists(path_value: str, field_name: str) -> str:
     return normalized
 
 
+def ensure_linux_directory(path_value: str, field_name: str) -> str:
+    normalized = ensure_safe_target_value(path_value, field_name)
+    result = run_linux_command(["mkdir", "-p", normalized], timeout_sec=15, require_zero_exit=True)
+    return normalized
+
+
+def build_linux_artifact_path(prefix: str, extension: str) -> str:
+    artifact_dir = ensure_linux_directory("/tmp/localllm-artifacts", "artifact_dir")
+    timestamp = int(time.time())
+    return posixpath.join(artifact_dir, f"{prefix}-{timestamp}{extension}")
+
+
 def run_linux_command(
     argv: list[str],
     timeout_sec: int = 120,
@@ -358,6 +371,25 @@ def get_effective_linux_tool_command(tool_name: str) -> str:
     return command_path
 
 
+def build_smbclient_auth_args(
+    username: str | None,
+    password: str | None,
+    workgroup: str | None,
+) -> list[str]:
+    argv: list[str] = []
+    if workgroup:
+        argv.extend(["-W", ensure_safe_target_value(workgroup, "workgroup")])
+    if username:
+        username_value = ensure_safe_target_value(username, "username")
+        if password is not None:
+            argv.extend(["-U", f"{username_value}%{password}"])
+        else:
+            argv.extend(["-U", username_value, "-N"])
+    else:
+        argv.append("-N")
+    return argv
+
+
 KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
     {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
@@ -374,12 +406,17 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_fping", "tool": "fping", "purpose": "Reachability probe for one or more hosts."},
     {"operation_id": "kali_run_arp_scan", "tool": "arp-scan", "purpose": "Local network ARP discovery with bounded scope."},
     {"operation_id": "kali_run_netcat_probe", "tool": "nc", "purpose": "TCP or UDP connectivity probe using netcat zero-I/O mode."},
+    {"operation_id": "kali_run_tcpdump_capture", "tool": "tcpdump", "purpose": "Bounded packet capture to a pcap file."},
+    {"operation_id": "kali_run_tshark_summary", "tool": "tshark", "purpose": "Packet summary view for a pcap artifact."},
+    {"operation_id": "kali_run_tshark_protocol_hierarchy", "tool": "tshark", "purpose": "Protocol hierarchy statistics for a pcap artifact."},
     {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
     {"operation_id": "kali_run_sslyze", "tool": "sslyze", "purpose": "TLS and HTTP header analysis using SSLyze."},
     {"operation_id": "kali_run_openssl_s_client", "tool": "openssl", "purpose": "TLS handshake inspection using openssl s_client."},
     {"operation_id": "kali_run_httpx", "tool": "httpx", "purpose": "HTTPX client request wrapper for the Kali-installed CLI variant."},
     {"operation_id": "kali_run_dnsenum", "tool": "dnsenum", "purpose": "Domain DNS enumeration."},
     {"operation_id": "kali_run_dnsrecon", "tool": "dnsrecon", "purpose": "DNS reconnaissance for a domain."},
+    {"operation_id": "kali_run_smbclient_list_shares", "tool": "smbclient", "purpose": "List SMB shares on a specific host and port."},
+    {"operation_id": "kali_run_smbclient_list_path", "tool": "smbclient", "purpose": "List contents of a specific SMB share path."},
     {"operation_id": "kali_run_gobuster_dir", "tool": "gobuster", "purpose": "Directory brute-force against a specific base URL."},
     {"operation_id": "kali_run_amass_passive", "tool": "amass", "purpose": "Passive subdomain enumeration."},
 ]
@@ -612,6 +649,30 @@ class KaliNetcatProbeRequest(BaseModel):
     verbose: bool = True
 
 
+class KaliTcpdumpCaptureRequest(BaseModel):
+    interface: str
+    capture_filter: str | None = None
+    output_path: str | None = None
+    packet_count: int | None = Field(None, ge=1, le=10000)
+    duration_sec: int | None = Field(5, ge=1, le=600)
+    snapshot_length: int = Field(256, ge=64, le=65535)
+    no_promiscuous: bool = True
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliTsharkSummaryRequest(BaseModel):
+    pcap_path: str
+    max_packets: int = Field(20, ge=1, le=500)
+    display_filter: str | None = None
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliTsharkProtocolHierarchyRequest(BaseModel):
+    pcap_path: str
+    display_filter: str | None = None
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
 class KaliSslscanRequest(BaseModel):
     host: str
     port: int = Field(443, ge=1, le=65535)
@@ -651,6 +712,20 @@ class KaliHttpxRequest(BaseModel):
 class KaliDomainRequest(BaseModel):
     domain: str
     timeout_sec: int = Field(300, ge=1, le=3600)
+
+
+class KaliSmbclientAuthRequest(BaseModel):
+    host: str
+    port: int = Field(445, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    workgroup: str | None = None
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliSmbclientListPathRequest(KaliSmbclientAuthRequest):
+    share: str
+    remote_path: str = "."
 
 
 class KaliGobusterDirRequest(BaseModel):
@@ -1245,6 +1320,62 @@ def kali_run_netcat_probe(request: KaliNetcatProbeRequest) -> dict[str, Any]:
     return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_tcpdump_capture", operation_id="kali_run_tcpdump_capture")
+def kali_run_tcpdump_capture(request: KaliTcpdumpCaptureRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("tcpdump")
+    interface = ensure_safe_target_value(request.interface, "interface")
+    output_path = ensure_safe_target_value(request.output_path, "output_path") if request.output_path else build_linux_artifact_path("tcpdump-capture", ".pcap")
+    ensure_linux_directory(posixpath.dirname(output_path) or "/tmp", "output_parent")
+
+    argv: list[str] = [tool, "-i", interface, "-n", "-U", "-w", output_path, "-s", str(request.snapshot_length)]
+    if request.no_promiscuous:
+        argv.append("-p")
+    if request.packet_count:
+        argv.extend(["-c", str(request.packet_count)])
+    if request.capture_filter:
+        argv.append(ensure_safe_target_value(request.capture_filter, "capture_filter"))
+
+    timeout_budget = request.timeout_sec
+    if request.duration_sec:
+        argv = ["timeout", str(request.duration_sec)] + argv
+        timeout_budget = max(timeout_budget, request.duration_sec + 10)
+
+    result = run_linux_command(argv, timeout_sec=timeout_budget, require_zero_exit=False)
+    if result["exit_code"] not in (0, 124):
+        raise HTTPException(status_code=500, detail=result)
+
+    stat_result = run_linux_command(["stat", "-c", "%s", output_path], timeout_sec=15, require_zero_exit=True)
+    size_bytes = int((stat_result["stdout"] or "0").strip() or "0")
+    if size_bytes <= 0:
+        raise HTTPException(status_code=500, detail=f"tcpdump capture file '{output_path}' was created but is empty.")
+
+    return {
+        **result,
+        "capture_path": output_path,
+        "size_bytes": size_bytes,
+    }
+
+
+@app.post("/tools/kali_run_tshark_summary", operation_id="kali_run_tshark_summary")
+def kali_run_tshark_summary(request: KaliTsharkSummaryRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("tshark")
+    pcap_path = ensure_linux_file_exists(request.pcap_path, "pcap_path")
+    argv = [tool, "-r", pcap_path, "-n", "-c", str(request.max_packets)]
+    if request.display_filter:
+        argv.extend(["-Y", ensure_safe_target_value(request.display_filter, "display_filter")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_tshark_protocol_hierarchy", operation_id="kali_run_tshark_protocol_hierarchy")
+def kali_run_tshark_protocol_hierarchy(request: KaliTsharkProtocolHierarchyRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("tshark")
+    pcap_path = ensure_linux_file_exists(request.pcap_path, "pcap_path")
+    argv = [tool, "-r", pcap_path, "-q", "-z", "io,phs"]
+    if request.display_filter:
+        argv.extend(["-Y", ensure_safe_target_value(request.display_filter, "display_filter")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_nmap", operation_id="kali_run_nmap")
 def kali_run_nmap(request: KaliNmapRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("nmap")
@@ -1335,6 +1466,26 @@ def kali_run_dnsrecon(request: KaliDomainRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("dnsrecon")
     domain = ensure_safe_target_value(request.domain, "domain")
     return run_linux_command([tool, "-d", domain], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_smbclient_list_shares", operation_id="kali_run_smbclient_list_shares")
+def kali_run_smbclient_list_shares(request: KaliSmbclientAuthRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("smbclient")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool, "-L", host, "-p", str(request.port), "-g", "-t", str(request.timeout_sec)]
+    argv.extend(build_smbclient_auth_args(request.username, request.password, request.workgroup))
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_smbclient_list_path", operation_id="kali_run_smbclient_list_path")
+def kali_run_smbclient_list_path(request: KaliSmbclientListPathRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("smbclient")
+    host = ensure_safe_target_value(request.host, "host")
+    share = ensure_safe_target_value(request.share, "share")
+    remote_path = ensure_safe_target_value(request.remote_path, "remote_path")
+    argv = [tool, f"//{host}/{share}", "-p", str(request.port), "-g", "-t", str(request.timeout_sec), "-c", f'ls "{remote_path}"']
+    argv.extend(build_smbclient_auth_args(request.username, request.password, request.workgroup))
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
 
 
 @app.post("/tools/kali_run_gobuster_dir", operation_id="kali_run_gobuster_dir")
