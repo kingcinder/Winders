@@ -391,6 +391,24 @@ def build_smbclient_auth_args(
 
 
 KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
+    {"operation_id": "kali_run_ip_address_show", "tool": "ip", "purpose": "Show interface address information."},
+    {"operation_id": "kali_run_ip_route_show", "tool": "ip", "purpose": "Show routing table information."},
+    {"operation_id": "kali_run_ip_neigh_show", "tool": "ip", "purpose": "Show ARP/neighbor cache information."},
+    {"operation_id": "kali_run_ss_listeners", "tool": "ss", "purpose": "Show listening sockets."},
+    {"operation_id": "kali_run_ss_connections", "tool": "ss", "purpose": "Show established or selected socket states."},
+    {"operation_id": "kali_run_ping_probe", "tool": "ping", "purpose": "Bounded ICMP reachability probe."},
+    {"operation_id": "kali_run_file_identify", "tool": "file", "purpose": "Identify file type or MIME metadata."},
+    {"operation_id": "kali_run_hash_file", "tool": "sha256sum", "purpose": "Compute a file hash using a selected algorithm."},
+    {"operation_id": "kali_run_strings_extract", "tool": "strings", "purpose": "Extract printable strings from a file."},
+    {"operation_id": "kali_run_xxd_preview", "tool": "xxd", "purpose": "Render a bounded hex preview of a file."},
+    {"operation_id": "kali_run_archive_list", "tool": "tar", "purpose": "List contents of a zip or tar archive."},
+    {"operation_id": "kali_run_system_inventory", "tool": "uname", "purpose": "Show core operating system inventory."},
+    {"operation_id": "kali_run_storage_inventory", "tool": "df", "purpose": "Show mounted storage and block-device inventory."},
+    {"operation_id": "kali_run_readelf_inspect", "tool": "readelf", "purpose": "Inspect ELF headers, sections, or dynamic info."},
+    {"operation_id": "kali_run_ldd_dependencies", "tool": "ldd", "purpose": "List shared-library dependencies for an ELF binary."},
+    {"operation_id": "kali_run_nm_symbols", "tool": "nm", "purpose": "List symbols from an ELF binary."},
+    {"operation_id": "kali_run_binwalk_scan", "tool": "binwalk", "purpose": "Scan a file for embedded signatures and objects."},
+    {"operation_id": "kali_run_exiftool_metadata", "tool": "exiftool", "purpose": "Extract file metadata using exiftool."},
     {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
     {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
     {"operation_id": "kali_run_host", "tool": "host", "purpose": "DNS lookup using the host CLI."},
@@ -547,6 +565,112 @@ class LinuxVmListDirectoryRequest(BaseModel):
 class LinuxVmListProcessesRequest(BaseModel):
     name_filter: str | None = None
     limit: int = Field(200, ge=1, le=2000)
+
+
+class KaliIpAddressShowRequest(BaseModel):
+    interface: str | None = None
+    family: Literal["all", "ipv4", "ipv6"] = "ipv4"
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliIpRouteShowRequest(BaseModel):
+    family: Literal["all", "ipv4", "ipv6"] = "ipv4"
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliIpNeighShowRequest(BaseModel):
+    interface: str | None = None
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliSsListenersRequest(BaseModel):
+    port: int | None = Field(None, ge=1, le=65535)
+    numeric: bool = True
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliSsConnectionsRequest(BaseModel):
+    state: Literal["all", "established", "connected", "time-wait", "syn-recv", "syn-sent"] = "established"
+    port: int | None = Field(None, ge=1, le=65535)
+    numeric: bool = True
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliPingProbeRequest(BaseModel):
+    host: str
+    count: int = Field(3, ge=1, le=10)
+    interval_sec: float = Field(0.3, ge=0.1, le=5.0)
+    timeout_sec: int = Field(10, ge=1, le=120)
+    ipv6: bool = False
+
+
+class KaliFileIdentifyRequest(BaseModel):
+    path: str
+    mime: bool = False
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliHashFileRequest(BaseModel):
+    path: str
+    algorithm: Literal["sha256", "md5"] = "sha256"
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliStringsExtractRequest(BaseModel):
+    path: str
+    min_length: int = Field(4, ge=1, le=64)
+    max_lines: int = Field(50, ge=1, le=1000)
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliXxdPreviewRequest(BaseModel):
+    path: str
+    length_bytes: int = Field(256, ge=16, le=65536)
+    seek_bytes: int = Field(0, ge=0, le=10485760)
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliArchiveListRequest(BaseModel):
+    path: str
+    max_lines: int = Field(200, ge=1, le=5000)
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliSystemInventoryRequest(BaseModel):
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliStorageInventoryRequest(BaseModel):
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliReadElfInspectRequest(BaseModel):
+    path: str
+    mode: Literal["headers", "sections", "dynamic", "program-headers"] = "headers"
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliLddDependenciesRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliNmSymbolsRequest(BaseModel):
+    path: str
+    dynamic_only: bool = False
+    extern_only: bool = False
+    max_lines: int = Field(200, ge=1, le=5000)
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliBinwalkScanRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliExiftoolMetadataRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(60, ge=1, le=600)
 
 
 class KaliWhoisRequest(BaseModel):
@@ -1240,6 +1364,198 @@ def linux_list_processes(request: LinuxVmListProcessesRequest) -> dict[str, Any]
         return {"processes": rows, "truncated": len(rows) >= request.limit}
     finally:
         client.close()
+
+
+@app.post("/tools/kali_run_ip_address_show", operation_id="kali_run_ip_address_show")
+def kali_run_ip_address_show(request: KaliIpAddressShowRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ip")
+    argv = [tool]
+    if request.family == "ipv4":
+        argv.append("-4")
+    elif request.family == "ipv6":
+        argv.append("-6")
+    argv.extend(["-o", "addr", "show"])
+    if request.interface:
+        argv.extend(["dev", ensure_safe_target_value(request.interface, "interface")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ip_route_show", operation_id="kali_run_ip_route_show")
+def kali_run_ip_route_show(request: KaliIpRouteShowRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ip")
+    argv = [tool]
+    if request.family == "ipv4":
+        argv.append("-4")
+    elif request.family == "ipv6":
+        argv.append("-6")
+    argv.extend(["route", "show"])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ip_neigh_show", operation_id="kali_run_ip_neigh_show")
+def kali_run_ip_neigh_show(request: KaliIpNeighShowRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ip")
+    argv = [tool, "neigh", "show"]
+    if request.interface:
+        argv.extend(["dev", ensure_safe_target_value(request.interface, "interface")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ss_listeners", operation_id="kali_run_ss_listeners")
+def kali_run_ss_listeners(request: KaliSsListenersRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ss")
+    argv = [tool, "-ltnp"]
+    if request.numeric:
+        argv.insert(1, "-n")
+    if request.port:
+        argv.append(f"sport = :{request.port}")
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ss_connections", operation_id="kali_run_ss_connections")
+def kali_run_ss_connections(request: KaliSsConnectionsRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ss")
+    argv = [tool, "-tp"]
+    if request.numeric:
+        argv.insert(1, "-n")
+    if request.state != "all":
+        argv.extend(["state", request.state])
+    if request.port:
+        argv.append(f"( sport = :{request.port} or dport = :{request.port} )")
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ping_probe", operation_id="kali_run_ping_probe")
+def kali_run_ping_probe(request: KaliPingProbeRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ping")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool, "-c", str(request.count), "-i", str(request.interval_sec), "-W", str(request.timeout_sec)]
+    if request.ipv6:
+        argv.append("-6")
+    argv.append(host)
+    return run_linux_command(argv, timeout_sec=(request.timeout_sec * request.count) + 10, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_file_identify", operation_id="kali_run_file_identify")
+def kali_run_file_identify(request: KaliFileIdentifyRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("file")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.mime:
+        argv.extend(["--mime", "-b"])
+    else:
+        argv.append("-b")
+    argv.append(path)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_hash_file", operation_id="kali_run_hash_file")
+def kali_run_hash_file(request: KaliHashFileRequest) -> dict[str, Any]:
+    tool_name = "sha256sum" if request.algorithm == "sha256" else "md5sum"
+    tool = get_effective_linux_tool_command(tool_name)
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_strings_extract", operation_id="kali_run_strings_extract")
+def kali_run_strings_extract(request: KaliStringsExtractRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("strings")
+    path = ensure_linux_file_exists(request.path, "path")
+    result = run_linux_command([tool, "-n", str(request.min_length), path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    lines = result["stdout"].splitlines()
+    truncated = len(lines) > request.max_lines
+    result["stdout"] = "\n".join(lines[: request.max_lines])
+    result["truncated"] = truncated
+    return result
+
+
+@app.post("/tools/kali_run_xxd_preview", operation_id="kali_run_xxd_preview")
+def kali_run_xxd_preview(request: KaliXxdPreviewRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("xxd")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool, "-l", str(request.length_bytes), "-s", str(request.seek_bytes), path]
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_archive_list", operation_id="kali_run_archive_list")
+def kali_run_archive_list(request: KaliArchiveListRequest) -> dict[str, Any]:
+    path = ensure_linux_file_exists(request.path, "path")
+    lower = path.lower()
+    if lower.endswith(".zip"):
+        tool = get_effective_linux_tool_command("unzip")
+        result = run_linux_command([tool, "-l", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    else:
+        tool = get_effective_linux_tool_command("tar")
+        result = run_linux_command([tool, "-tf", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    lines = result["stdout"].splitlines()
+    truncated = len(lines) > request.max_lines
+    result["stdout"] = "\n".join(lines[: request.max_lines])
+    result["truncated"] = truncated
+    return result
+
+
+@app.post("/tools/kali_run_system_inventory", operation_id="kali_run_system_inventory")
+def kali_run_system_inventory(request: KaliSystemInventoryRequest) -> dict[str, Any]:
+    cmd = "uname -a; echo '---'; lsb_release -a 2>/dev/null || true"
+    return run_linux_command(["bash", "-lc", cmd], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_storage_inventory", operation_id="kali_run_storage_inventory")
+def kali_run_storage_inventory(request: KaliStorageInventoryRequest) -> dict[str, Any]:
+    cmd = "df -h; echo '---'; lsblk -o NAME,SIZE,TYPE,MOUNTPOINT"
+    return run_linux_command(["bash", "-lc", cmd], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_readelf_inspect", operation_id="kali_run_readelf_inspect")
+def kali_run_readelf_inspect(request: KaliReadElfInspectRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("readelf")
+    path = ensure_linux_file_exists(request.path, "path")
+    flag_map = {
+        "headers": "-h",
+        "sections": "-S",
+        "dynamic": "-d",
+        "program-headers": "-l",
+    }
+    return run_linux_command([tool, flag_map[request.mode], path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_ldd_dependencies", operation_id="kali_run_ldd_dependencies")
+def kali_run_ldd_dependencies(request: KaliLddDependenciesRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("ldd")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_nm_symbols", operation_id="kali_run_nm_symbols")
+def kali_run_nm_symbols(request: KaliNmSymbolsRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("nm")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.dynamic_only:
+        argv.append("-D")
+    if request.extern_only:
+        argv.append("-g")
+    argv.append(path)
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+    lines = result["stdout"].splitlines()
+    truncated = len(lines) > request.max_lines
+    result["stdout"] = "\n".join(lines[: request.max_lines])
+    result["truncated"] = truncated
+    return result
+
+
+@app.post("/tools/kali_run_binwalk_scan", operation_id="kali_run_binwalk_scan")
+def kali_run_binwalk_scan(request: KaliBinwalkScanRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("binwalk")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_exiftool_metadata", operation_id="kali_run_exiftool_metadata")
+def kali_run_exiftool_metadata(request: KaliExiftoolMetadataRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("exiftool")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
 @app.post("/tools/kali_run_whois", operation_id="kali_run_whois")
