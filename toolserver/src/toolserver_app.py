@@ -302,6 +302,14 @@ def ensure_linux_file_exists(path_value: str, field_name: str) -> str:
     return normalized
 
 
+def ensure_linux_directory_exists(path_value: str, field_name: str) -> str:
+    normalized = ensure_safe_target_value(path_value, field_name)
+    result = run_linux_command(["test", "-d", normalized], timeout_sec=15)
+    if result["exit_code"] != 0:
+        raise HTTPException(status_code=400, detail=f"{field_name} '{normalized}' does not exist in the Kali VM.")
+    return normalized
+
+
 def ensure_linux_directory(path_value: str, field_name: str) -> str:
     normalized = ensure_safe_target_value(path_value, field_name)
     result = run_linux_command(["mkdir", "-p", normalized], timeout_sec=15, require_zero_exit=True)
@@ -409,6 +417,17 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_nm_symbols", "tool": "nm", "purpose": "List symbols from an ELF binary."},
     {"operation_id": "kali_run_binwalk_scan", "tool": "binwalk", "purpose": "Scan a file for embedded signatures and objects."},
     {"operation_id": "kali_run_exiftool_metadata", "tool": "exiftool", "purpose": "Extract file metadata using exiftool."},
+    {"operation_id": "kali_run_yara_scan_file", "tool": "yara", "purpose": "Run a bounded YARA scan against a single file."},
+    {"operation_id": "kali_run_yara_scan_directory", "tool": "yara", "purpose": "Run a bounded YARA scan against a directory tree."},
+    {"operation_id": "kali_run_clamscan_file", "tool": "clamscan", "purpose": "Run ClamAV against a single file and report infected vs clean."},
+    {"operation_id": "kali_run_clamscan_directory", "tool": "clamscan", "purpose": "Run ClamAV against a directory tree and report infected vs clean."},
+    {"operation_id": "kali_run_pdfinfo_inspect", "tool": "pdfinfo", "purpose": "Inspect PDF metadata and structure summary."},
+    {"operation_id": "kali_run_pdftotext_extract", "tool": "pdftotext", "purpose": "Extract text from a PDF into a bounded artifact file."},
+    {"operation_id": "kali_run_pdfimages_list", "tool": "pdfimages", "purpose": "List embedded images inside a PDF."},
+    {"operation_id": "kali_run_pdfimages_extract", "tool": "pdfimages", "purpose": "Extract embedded images from a PDF into a bounded artifact directory."},
+    {"operation_id": "kali_run_identify_image", "tool": "identify", "purpose": "Inspect image dimensions, format, and optional verbose metadata."},
+    {"operation_id": "kali_run_pngcheck_inspect", "tool": "pngcheck", "purpose": "Validate PNG structure and chunk metadata."},
+    {"operation_id": "kali_run_jpeginfo_check", "tool": "jpeginfo", "purpose": "Validate JPEG structure and report errors."},
     {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
     {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
     {"operation_id": "kali_run_host", "tool": "host", "purpose": "DNS lookup using the host CLI."},
@@ -433,6 +452,11 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_tshark_endpoints", "tool": "tshark", "purpose": "Endpoint statistics for a pcap artifact."},
     {"operation_id": "kali_run_tshark_follow_stream", "tool": "tshark", "purpose": "Follow a decoded stream inside a pcap artifact."},
     {"operation_id": "kali_run_tshark_export_objects", "tool": "tshark", "purpose": "Export protocol objects from a pcap artifact into a local directory."},
+    {"operation_id": "kali_run_tshark_export_http_objects", "tool": "tshark", "purpose": "Export HTTP objects from a pcap artifact into a local directory."},
+    {"operation_id": "kali_run_tshark_export_smb_objects", "tool": "tshark", "purpose": "Export SMB objects from a pcap artifact into a local directory."},
+    {"operation_id": "kali_run_tshark_export_imf_objects", "tool": "tshark", "purpose": "Export IMF objects from a pcap artifact into a local directory."},
+    {"operation_id": "kali_run_tshark_export_tftp_objects", "tool": "tshark", "purpose": "Export TFTP objects from a pcap artifact into a local directory."},
+    {"operation_id": "kali_run_tshark_export_dicom_objects", "tool": "tshark", "purpose": "Export DICOM objects from a pcap artifact into a local directory."},
     {"operation_id": "kali_run_tshark_conversations", "tool": "tshark", "purpose": "Conversation statistics for a pcap artifact."},
     {"operation_id": "kali_run_tshark_fields", "tool": "tshark", "purpose": "Field extraction from a pcap artifact."},
     {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
@@ -673,6 +697,81 @@ class KaliExiftoolMetadataRequest(BaseModel):
     timeout_sec: int = Field(60, ge=1, le=600)
 
 
+class KaliYaraScanFileRequest(BaseModel):
+    rule_path: str
+    target_path: str
+    show_tags: bool = False
+    show_metadata: bool = False
+    show_strings: bool = False
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliYaraScanDirectoryRequest(BaseModel):
+    rule_path: str
+    target_dir: str
+    recursive: bool = True
+    show_tags: bool = False
+    show_metadata: bool = False
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliClamscanFileRequest(BaseModel):
+    path: str
+    include_summary: bool = True
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliClamscanDirectoryRequest(BaseModel):
+    path: str
+    recursive: bool = True
+    include_summary: bool = True
+    timeout_sec: int = Field(300, ge=1, le=1800)
+
+
+class KaliPdfinfoInspectRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliPdftotextExtractRequest(BaseModel):
+    path: str
+    first_page: int | None = Field(None, ge=1, le=100000)
+    last_page: int | None = Field(None, ge=1, le=100000)
+    layout: bool = False
+    output_path: str | None = None
+    preview_chars: int = Field(4000, ge=1, le=100000)
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliPdfimagesListRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliPdfimagesExtractRequest(BaseModel):
+    path: str
+    format: Literal["native", "png"] = "native"
+    output_dir: str | None = None
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliIdentifyImageRequest(BaseModel):
+    path: str
+    verbose: bool = False
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliPngcheckInspectRequest(BaseModel):
+    path: str
+    verbose: bool = False
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliJpeginfoCheckRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
 class KaliWhoisRequest(BaseModel):
     query: str
     timeout_sec: int = Field(120, ge=1, le=1800)
@@ -851,6 +950,12 @@ class KaliTsharkFollowStreamRequest(BaseModel):
 class KaliTsharkExportObjectsRequest(BaseModel):
     pcap_path: str
     protocol: Literal["http", "dicom", "imf", "smb", "tftp"] = "http"
+    output_dir: str | None = None
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliTsharkFixedProtocolExportRequest(BaseModel):
+    pcap_path: str
     output_dir: str | None = None
     timeout_sec: int = Field(120, ge=1, le=1800)
 
@@ -1558,6 +1663,157 @@ def kali_run_exiftool_metadata(request: KaliExiftoolMetadataRequest) -> dict[str
     return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_yara_scan_file", operation_id="kali_run_yara_scan_file")
+def kali_run_yara_scan_file(request: KaliYaraScanFileRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("yara")
+    rule_path = ensure_linux_file_exists(request.rule_path, "rule_path")
+    target_path = ensure_linux_file_exists(request.target_path, "target_path")
+    argv = [tool]
+    if request.show_tags:
+        argv.append("-g")
+    if request.show_metadata:
+        argv.append("-m")
+    if request.show_strings:
+        argv.append("-s")
+    argv.extend([rule_path, target_path])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_yara_scan_directory", operation_id="kali_run_yara_scan_directory")
+def kali_run_yara_scan_directory(request: KaliYaraScanDirectoryRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("yara")
+    rule_path = ensure_linux_file_exists(request.rule_path, "rule_path")
+    target_dir = ensure_linux_directory_exists(request.target_dir, "target_dir")
+    argv = [tool]
+    if request.recursive:
+        argv.append("-r")
+    if request.show_tags:
+        argv.append("-g")
+    if request.show_metadata:
+        argv.append("-m")
+    argv.extend([rule_path, target_dir])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_clamscan_file", operation_id="kali_run_clamscan_file")
+def kali_run_clamscan_file(request: KaliClamscanFileRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("clamscan")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool, "--infected"]
+    if not request.include_summary:
+        argv.append("--no-summary")
+    argv.append(path)
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec)
+    if result["exit_code"] not in {0, 1}:
+        raise HTTPException(status_code=500, detail=result)
+    result["infected"] = result["exit_code"] == 1
+    return result
+
+
+@app.post("/tools/kali_run_clamscan_directory", operation_id="kali_run_clamscan_directory")
+def kali_run_clamscan_directory(request: KaliClamscanDirectoryRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("clamscan")
+    path = ensure_linux_directory_exists(request.path, "path")
+    argv = [tool, "--infected"]
+    if request.recursive:
+        argv.append("-r")
+    if not request.include_summary:
+        argv.append("--no-summary")
+    argv.append(path)
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec)
+    if result["exit_code"] not in {0, 1}:
+        raise HTTPException(status_code=500, detail=result)
+    result["infected"] = result["exit_code"] == 1
+    return result
+
+
+@app.post("/tools/kali_run_pdfinfo_inspect", operation_id="kali_run_pdfinfo_inspect")
+def kali_run_pdfinfo_inspect(request: KaliPdfinfoInspectRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pdfinfo")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pdftotext_extract", operation_id="kali_run_pdftotext_extract")
+def kali_run_pdftotext_extract(request: KaliPdftotextExtractRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pdftotext")
+    path = ensure_linux_file_exists(request.path, "path")
+    output_path = ensure_safe_target_value(request.output_path, "output_path") if request.output_path else build_linux_artifact_path("pdftotext", ".txt")
+    argv = [tool, "-enc", "UTF-8"]
+    if request.layout:
+        argv.append("-layout")
+    if request.first_page is not None:
+        argv.extend(["-f", str(request.first_page)])
+    if request.last_page is not None:
+        argv.extend(["-l", str(request.last_page)])
+    argv.extend([path, output_path])
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+    preview = run_linux_command(["bash", "-lc", f"head -c {request.preview_chars} {shlex.quote(output_path)}"], timeout_sec=15, require_zero_exit=True)
+    stats = run_linux_command(["stat", "-c", "%s", output_path], timeout_sec=15, require_zero_exit=True)
+    return {
+        **result,
+        "output_path": output_path,
+        "preview": preview["stdout"],
+        "size_bytes": int(stats["stdout"].strip() or "0"),
+    }
+
+
+@app.post("/tools/kali_run_pdfimages_list", operation_id="kali_run_pdfimages_list")
+def kali_run_pdfimages_list(request: KaliPdfimagesListRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pdfimages")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-list", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pdfimages_extract", operation_id="kali_run_pdfimages_extract")
+def kali_run_pdfimages_extract(request: KaliPdfimagesExtractRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pdfimages")
+    path = ensure_linux_file_exists(request.path, "path")
+    output_dir = ensure_linux_directory(request.output_dir, "output_dir") if request.output_dir else ensure_linux_directory(build_linux_artifact_path("pdfimages", ""), "output_dir")
+    prefix = posixpath.join(output_dir, "image")
+    argv = [tool]
+    if request.format == "png":
+        argv.append("-png")
+    argv.extend([path, prefix])
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+    listing = run_linux_command(["find", output_dir, "-maxdepth", "1", "-type", "f", "-printf", "%f\n"], timeout_sec=15, require_zero_exit=True)
+    files = [line.strip() for line in listing["stdout"].splitlines() if line.strip()]
+    return {
+        **result,
+        "output_dir": output_dir,
+        "exported_files": files,
+    }
+
+
+@app.post("/tools/kali_run_identify_image", operation_id="kali_run_identify_image")
+def kali_run_identify_image(request: KaliIdentifyImageRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("identify")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.verbose:
+        argv.append("-verbose")
+    argv.append(path)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pngcheck_inspect", operation_id="kali_run_pngcheck_inspect")
+def kali_run_pngcheck_inspect(request: KaliPngcheckInspectRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pngcheck")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.verbose:
+        argv.append("-v")
+    argv.append(path)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_jpeginfo_check", operation_id="kali_run_jpeginfo_check")
+def kali_run_jpeginfo_check(request: KaliJpeginfoCheckRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("jpeginfo")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-c", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_whois", operation_id="kali_run_whois")
 def kali_run_whois(request: KaliWhoisRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("whois")
@@ -1854,12 +2110,16 @@ def kali_run_tshark_follow_stream(request: KaliTsharkFollowStreamRequest) -> dic
     return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
-@app.post("/tools/kali_run_tshark_export_objects", operation_id="kali_run_tshark_export_objects")
-def kali_run_tshark_export_objects(request: KaliTsharkExportObjectsRequest) -> dict[str, Any]:
+def export_tshark_objects(
+    pcap_path_value: str,
+    protocol: Literal["http", "dicom", "imf", "smb", "tftp"],
+    output_dir_value: str | None,
+    timeout_sec: int,
+) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("tshark")
-    pcap_path = ensure_linux_file_exists(request.pcap_path, "pcap_path")
-    output_dir = ensure_linux_directory(request.output_dir, "output_dir") if request.output_dir else ensure_linux_directory(build_linux_artifact_path("tshark-export", ""), "output_dir")
-    result = run_linux_command([tool, "-r", pcap_path, "--export-objects", f"{request.protocol},{output_dir}"], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    pcap_path = ensure_linux_file_exists(pcap_path_value, "pcap_path")
+    output_dir = ensure_linux_directory(output_dir_value, "output_dir") if output_dir_value else ensure_linux_directory(build_linux_artifact_path(f"tshark-export-{protocol}", ""), "output_dir")
+    result = run_linux_command([tool, "-r", pcap_path, "--export-objects", f"{protocol},{output_dir}"], timeout_sec=timeout_sec, require_zero_exit=True)
     listing = run_linux_command(["find", output_dir, "-maxdepth", "1", "-type", "f", "-printf", "%f\n"], timeout_sec=15, require_zero_exit=True)
     files = [line.strip() for line in listing["stdout"].splitlines() if line.strip()]
     return {
@@ -1867,6 +2127,36 @@ def kali_run_tshark_export_objects(request: KaliTsharkExportObjectsRequest) -> d
         "output_dir": output_dir,
         "exported_files": files,
     }
+
+
+@app.post("/tools/kali_run_tshark_export_objects", operation_id="kali_run_tshark_export_objects")
+def kali_run_tshark_export_objects(request: KaliTsharkExportObjectsRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, request.protocol, request.output_dir, request.timeout_sec)
+
+
+@app.post("/tools/kali_run_tshark_export_http_objects", operation_id="kali_run_tshark_export_http_objects")
+def kali_run_tshark_export_http_objects(request: KaliTsharkFixedProtocolExportRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, "http", request.output_dir, request.timeout_sec)
+
+
+@app.post("/tools/kali_run_tshark_export_smb_objects", operation_id="kali_run_tshark_export_smb_objects")
+def kali_run_tshark_export_smb_objects(request: KaliTsharkFixedProtocolExportRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, "smb", request.output_dir, request.timeout_sec)
+
+
+@app.post("/tools/kali_run_tshark_export_imf_objects", operation_id="kali_run_tshark_export_imf_objects")
+def kali_run_tshark_export_imf_objects(request: KaliTsharkFixedProtocolExportRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, "imf", request.output_dir, request.timeout_sec)
+
+
+@app.post("/tools/kali_run_tshark_export_tftp_objects", operation_id="kali_run_tshark_export_tftp_objects")
+def kali_run_tshark_export_tftp_objects(request: KaliTsharkFixedProtocolExportRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, "tftp", request.output_dir, request.timeout_sec)
+
+
+@app.post("/tools/kali_run_tshark_export_dicom_objects", operation_id="kali_run_tshark_export_dicom_objects")
+def kali_run_tshark_export_dicom_objects(request: KaliTsharkFixedProtocolExportRequest) -> dict[str, Any]:
+    return export_tshark_objects(request.pcap_path, "dicom", request.output_dir, request.timeout_sec)
 
 
 @app.post("/tools/kali_run_tshark_conversations", operation_id="kali_run_tshark_conversations")
