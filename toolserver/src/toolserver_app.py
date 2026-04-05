@@ -359,7 +359,8 @@ def run_linux_command(
 
 
 def resolve_linux_tool_command(tool_name: str) -> str:
-    result = run_linux_command(["command", "-v", tool_name], timeout_sec=15)
+    safe_name = ensure_safe_target_value(tool_name, "tool_name")
+    result = run_linux_command(["bash", "-lc", f"command -v {shlex.quote(safe_name)}"], timeout_sec=15)
     if result["exit_code"] != 0 or not result["stdout"].strip():
         raise HTTPException(status_code=404, detail=f"Kali tool '{tool_name}' is not installed in the VM.")
     return result["stdout"].splitlines()[0].strip()
@@ -428,6 +429,26 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_identify_image", "tool": "identify", "purpose": "Inspect image dimensions, format, and optional verbose metadata."},
     {"operation_id": "kali_run_pngcheck_inspect", "tool": "pngcheck", "purpose": "Validate PNG structure and chunk metadata."},
     {"operation_id": "kali_run_jpeginfo_check", "tool": "jpeginfo", "purpose": "Validate JPEG structure and report errors."},
+    {"operation_id": "kali_run_rabin2_info", "tool": "rabin2", "purpose": "Extract high-level binary metadata using rabin2."},
+    {"operation_id": "kali_run_rabin2_sections", "tool": "rabin2", "purpose": "List binary sections using rabin2."},
+    {"operation_id": "kali_run_rabin2_imports", "tool": "rabin2", "purpose": "List imported symbols using rabin2."},
+    {"operation_id": "kali_run_rabin2_exports", "tool": "rabin2", "purpose": "List exported symbols using rabin2."},
+    {"operation_id": "kali_run_rabin2_strings", "tool": "rabin2", "purpose": "Extract strings using rabin2 with bounded length and output."},
+    {"operation_id": "kali_run_r2_analysis_summary", "tool": "r2", "purpose": "Run a bounded radare2 analysis summary without interactive shell access."},
+    {"operation_id": "kali_run_readpe_report", "tool": "readpe", "purpose": "Extract PE headers, sections, imports, exports, or directories using readpe."},
+    {"operation_id": "kali_run_pehash", "tool": "pehash", "purpose": "Hash a PE file or selected PE components."},
+    {"operation_id": "kali_run_pescan", "tool": "pescan", "purpose": "Search a PE file for suspicious indicators."},
+    {"operation_id": "kali_run_pesec", "tool": "pesec", "purpose": "Inspect PE security mitigations and certificate details."},
+    {"operation_id": "kali_run_pepack", "tool": "pepack", "purpose": "Detect common packer signatures in a PE file."},
+    {"operation_id": "kali_run_peldd", "tool": "peldd", "purpose": "List PE library dependencies."},
+    {"operation_id": "kali_run_osslsigncode_verify", "tool": "osslsigncode", "purpose": "Verify Authenticode signatures on Windows binaries."},
+    {"operation_id": "kali_run_oleid", "tool": "oleid", "purpose": "Inspect OLE or Office files for suspicious document features."},
+    {"operation_id": "kali_run_olemeta", "tool": "olemeta", "purpose": "Extract OLE metadata."},
+    {"operation_id": "kali_run_oledir", "tool": "oledir", "purpose": "List OLE streams and storage layout."},
+    {"operation_id": "kali_run_olevba_analysis", "tool": "olevba", "purpose": "Analyze VBA macros or report that no VBA was found."},
+    {"operation_id": "kali_run_mraptor_scan", "tool": "mraptor", "purpose": "Flag suspicious VBA macro patterns using mraptor."},
+    {"operation_id": "kali_run_oleobj_extract", "tool": "oleobj", "purpose": "Extract embedded OLE objects into a bounded artifact directory."},
+    {"operation_id": "kali_run_rtfobj_extract", "tool": "rtfobj", "purpose": "Extract embedded RTF objects into a bounded artifact directory."},
     {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
     {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
     {"operation_id": "kali_run_host", "tool": "host", "purpose": "DNS lookup using the host CLI."},
@@ -770,6 +791,72 @@ class KaliPngcheckInspectRequest(BaseModel):
 class KaliJpeginfoCheckRequest(BaseModel):
     path: str
     timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliRabin2BasicRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliRabin2StringsRequest(BaseModel):
+    path: str
+    min_chars: int = Field(4, ge=1, le=128)
+    max_lines: int = Field(200, ge=1, le=5000)
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliR2AnalysisSummaryRequest(BaseModel):
+    path: str
+    max_lines: int = Field(300, ge=1, le=5000)
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliReadpeReportRequest(BaseModel):
+    path: str
+    mode: Literal["all", "headers", "sections", "imports", "exports", "dirs"] = "all"
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliPehashRequest(BaseModel):
+    path: str
+    mode: Literal["content", "all", "dos-header", "coff-header", "optional-header"] = "content"
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliPeToolBasicRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliOleBasicRequest(BaseModel):
+    path: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliOlevbaAnalysisRequest(BaseModel):
+    path: str
+    decode: bool = False
+    analysis_only: bool = True
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliMraptorScanRequest(BaseModel):
+    path: str
+    show_matches: bool = False
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliOleobjExtractRequest(BaseModel):
+    path: str
+    output_dir: str | None = None
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliRtfobjExtractRequest(BaseModel):
+    path: str
+    output_dir: str | None = None
+    save_mode: Literal["all", "1", "2", "3"] = "all"
+    timeout_sec: int = Field(180, ge=1, le=1800)
 
 
 class KaliWhoisRequest(BaseModel):
@@ -1812,6 +1899,201 @@ def kali_run_jpeginfo_check(request: KaliJpeginfoCheckRequest) -> dict[str, Any]
     tool = get_effective_linux_tool_command("jpeginfo")
     path = ensure_linux_file_exists(request.path, "path")
     return run_linux_command([tool, "-c", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_rabin2_info", operation_id="kali_run_rabin2_info")
+def kali_run_rabin2_info(request: KaliRabin2BasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rabin2")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-I", "-j", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_rabin2_sections", operation_id="kali_run_rabin2_sections")
+def kali_run_rabin2_sections(request: KaliRabin2BasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rabin2")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-S", "-j", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_rabin2_imports", operation_id="kali_run_rabin2_imports")
+def kali_run_rabin2_imports(request: KaliRabin2BasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rabin2")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-i", "-j", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_rabin2_exports", operation_id="kali_run_rabin2_exports")
+def kali_run_rabin2_exports(request: KaliRabin2BasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rabin2")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-E", "-j", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_rabin2_strings", operation_id="kali_run_rabin2_strings")
+def kali_run_rabin2_strings(request: KaliRabin2StringsRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rabin2")
+    path = ensure_linux_file_exists(request.path, "path")
+    result = run_linux_command([tool, "-zz", "-N", f"{request.min_chars}:256", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    lines = result["stdout"].splitlines()
+    truncated = len(lines) > request.max_lines
+    result["stdout"] = "\n".join(lines[: request.max_lines])
+    result["truncated"] = truncated
+    return result
+
+
+@app.post("/tools/kali_run_r2_analysis_summary", operation_id="kali_run_r2_analysis_summary")
+def kali_run_r2_analysis_summary(request: KaliR2AnalysisSummaryRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("r2")
+    path = ensure_linux_file_exists(request.path, "path")
+    result = run_linux_command([tool, "-2q", "-c", "iI;iS;ii;iE;afl", "-c", "q", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+    lines = result["stdout"].splitlines()
+    truncated = len(lines) > request.max_lines
+    result["stdout"] = "\n".join(lines[: request.max_lines])
+    result["truncated"] = truncated
+    return result
+
+
+@app.post("/tools/kali_run_readpe_report", operation_id="kali_run_readpe_report")
+def kali_run_readpe_report(request: KaliReadpeReportRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("readpe")
+    path = ensure_linux_file_exists(request.path, "path")
+    mode_args = {
+        "all": ["-A"],
+        "headers": ["-H"],
+        "sections": ["-S"],
+        "imports": ["-i"],
+        "exports": ["-e"],
+        "dirs": ["-d"],
+    }[request.mode]
+    return run_linux_command([tool, *mode_args, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pehash", operation_id="kali_run_pehash")
+def kali_run_pehash(request: KaliPehashRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pehash")
+    path = ensure_linux_file_exists(request.path, "path")
+    mode_args = {
+        "content": ["-c"],
+        "all": ["-a"],
+        "dos-header": ["-h", "dos"],
+        "coff-header": ["-h", "coff"],
+        "optional-header": ["-h", "optional"],
+    }[request.mode]
+    return run_linux_command([tool, *mode_args, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pescan", operation_id="kali_run_pescan")
+def kali_run_pescan(request: KaliPeToolBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pescan")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pesec", operation_id="kali_run_pesec")
+def kali_run_pesec(request: KaliPeToolBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pesec")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_pepack", operation_id="kali_run_pepack")
+def kali_run_pepack(request: KaliPeToolBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("pepack")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_peldd", operation_id="kali_run_peldd")
+def kali_run_peldd(request: KaliPeToolBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("peldd")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, "-f", "json", path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_osslsigncode_verify", operation_id="kali_run_osslsigncode_verify")
+def kali_run_osslsigncode_verify(request: KaliPeToolBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("osslsigncode")
+    path = ensure_linux_file_exists(request.path, "path")
+    result = run_linux_command([tool, "verify", "-in", path], timeout_sec=request.timeout_sec)
+    if result["exit_code"] not in {0, 1}:
+        raise HTTPException(status_code=500, detail=result)
+    result["verified_signature"] = result["exit_code"] == 0
+    return result
+
+
+@app.post("/tools/kali_run_oleid", operation_id="kali_run_oleid")
+def kali_run_oleid(request: KaliOleBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("oleid")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_olemeta", operation_id="kali_run_olemeta")
+def kali_run_olemeta(request: KaliOleBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("olemeta")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_oledir", operation_id="kali_run_oledir")
+def kali_run_oledir(request: KaliOleBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("oledir")
+    path = ensure_linux_file_exists(request.path, "path")
+    return run_linux_command([tool, path], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_olevba_analysis", operation_id="kali_run_olevba_analysis")
+def kali_run_olevba_analysis(request: KaliOlevbaAnalysisRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("olevba")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.analysis_only:
+        argv.append("-a")
+    if request.decode:
+        argv.append("--decode")
+    argv.append(path)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec)
+
+
+@app.post("/tools/kali_run_mraptor_scan", operation_id="kali_run_mraptor_scan")
+def kali_run_mraptor_scan(request: KaliMraptorScanRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("mraptor")
+    path = ensure_linux_file_exists(request.path, "path")
+    argv = [tool]
+    if request.show_matches:
+        argv.append("-m")
+    argv.append(path)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec)
+
+
+@app.post("/tools/kali_run_oleobj_extract", operation_id="kali_run_oleobj_extract")
+def kali_run_oleobj_extract(request: KaliOleobjExtractRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("oleobj")
+    path = ensure_linux_file_exists(request.path, "path")
+    output_dir = ensure_linux_directory(request.output_dir, "output_dir") if request.output_dir else ensure_linux_directory(build_linux_artifact_path("oleobj", ""), "output_dir")
+    result = run_linux_command([tool, "-d", output_dir, path], timeout_sec=request.timeout_sec)
+    listing = run_linux_command(["find", output_dir, "-type", "f", "-printf", "%f\n"], timeout_sec=15, require_zero_exit=True)
+    files = [line.strip() for line in listing["stdout"].splitlines() if line.strip()]
+    return {
+        **result,
+        "output_dir": output_dir,
+        "extracted_files": files,
+    }
+
+
+@app.post("/tools/kali_run_rtfobj_extract", operation_id="kali_run_rtfobj_extract")
+def kali_run_rtfobj_extract(request: KaliRtfobjExtractRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("rtfobj")
+    path = ensure_linux_file_exists(request.path, "path")
+    output_dir = ensure_linux_directory(request.output_dir, "output_dir") if request.output_dir else ensure_linux_directory(build_linux_artifact_path("rtfobj", ""), "output_dir")
+    result = run_linux_command([tool, "-s", request.save_mode, "-d", output_dir, path], timeout_sec=request.timeout_sec)
+    listing = run_linux_command(["find", output_dir, "-type", "f", "-printf", "%f\n"], timeout_sec=15, require_zero_exit=True)
+    files = [line.strip() for line in listing["stdout"].splitlines() if line.strip()]
+    return {
+        **result,
+        "output_dir": output_dir,
+        "extracted_files": files,
+    }
 
 
 @app.post("/tools/kali_run_whois", operation_id="kali_run_whois")
