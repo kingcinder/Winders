@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
+import paramiko
 from pydantic import BaseModel, Field
 
 
@@ -24,6 +27,7 @@ def load_runtime_config() -> dict[str, Any]:
 RUNTIME_CONFIG = load_runtime_config()
 SERVER_CONFIG = RUNTIME_CONFIG["server"]
 SANDBOX_CONFIG = RUNTIME_CONFIG["sandbox"]
+LINUX_VM_CONFIG = RUNTIME_CONFIG.get("linux_vm", {})
 
 app = FastAPI(
     title=SERVER_CONFIG["name"],
@@ -120,6 +124,165 @@ def require_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=403, detail="Invalid bearer token.")
 
 
+def run_local_command(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def find_vboxmanage() -> str:
+    candidates = [
+        shutil.which("VBoxManage.exe"),
+        shutil.which("VBoxManage"),
+        r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise HTTPException(status_code=500, detail="VBoxManage.exe not found on host.")
+
+
+def get_linux_vm_name(vm_name: str | None = None) -> str:
+    name = (vm_name or LINUX_VM_CONFIG.get("virtualbox_vm_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Linux VM name is not configured.")
+    return name
+
+
+def get_virtualbox_showvminfo(vm_name: str | None = None) -> dict[str, str]:
+    vboxmanage = find_vboxmanage()
+    result = run_local_command([vboxmanage, "showvminfo", get_linux_vm_name(vm_name), "--machinereadable"], timeout=60)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or result.stdout.strip() or "VBoxManage showvminfo failed.")
+
+    data: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip().strip('"')
+    return data
+
+
+def get_virtualbox_guestproperties(vm_name: str | None = None) -> dict[str, str]:
+    vboxmanage = find_vboxmanage()
+    result = run_local_command([vboxmanage, "guestproperty", "enumerate", get_linux_vm_name(vm_name)], timeout=60)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or result.stdout.strip() or "VBoxManage guestproperty enumerate failed.")
+
+    properties: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, remainder = line.split("=", 1)
+        key = key.strip()
+        value = remainder.split("@", 1)[0].strip().strip("'")
+        properties[key] = value
+    return properties
+
+
+def get_linux_vm_status_payload(vm_name: str | None = None) -> dict[str, Any]:
+    name = get_linux_vm_name(vm_name)
+    info = get_virtualbox_showvminfo(name)
+    properties = get_virtualbox_guestproperties(name)
+    return {
+        "provider": "virtualbox",
+        "vm_name": name,
+        "state": info.get("VMState"),
+        "session_name": info.get("SessionName"),
+        "ssh_host": LINUX_VM_CONFIG.get("ssh_host"),
+        "ssh_port": int(LINUX_VM_CONFIG.get("ssh_port", 22)),
+        "nat_rule_name": LINUX_VM_CONFIG.get("nat_rule_name"),
+        "nat_forwarding": [value for key, value in info.items() if key.startswith("Forwarding(")],
+        "guest_ipv4": properties.get("/VirtualBox/GuestInfo/Net/0/V4/IP"),
+        "guest_user_detected": properties.get("/VirtualBox/GuestInfo/OS/LoggedInUsersList") or LINUX_VM_CONFIG.get("detected_user"),
+        "guest_os": properties.get("/VirtualBox/GuestInfo/OS/Product"),
+        "guest_release": properties.get("/VirtualBox/GuestInfo/OS/Release"),
+        "guest_version": properties.get("/VirtualBox/GuestInfo/OS/Version"),
+    }
+
+
+def ensure_virtualbox_nat_ssh_forward_impl(vm_name: str | None = None) -> dict[str, Any]:
+    name = get_linux_vm_name(vm_name)
+    info = get_virtualbox_showvminfo(name)
+    vboxmanage = find_vboxmanage()
+    ssh_host = str(LINUX_VM_CONFIG.get("ssh_host", "127.0.0.1"))
+    ssh_port = str(int(LINUX_VM_CONFIG.get("ssh_port", 2222)))
+    rule_name = str(LINUX_VM_CONFIG.get("nat_rule_name", "localllm-ssh"))
+    rule_value = f"{rule_name},tcp,{ssh_host},{ssh_port},,22"
+
+    if any(value == rule_value for key, value in info.items() if key.startswith("Forwarding(")):
+        return {
+            "vm_name": name,
+            "already_present": True,
+            "rule": rule_value,
+        }
+
+    delete_args = [vboxmanage, "controlvm" if info.get("VMState") == "running" else "modifyvm", name, "natpf1"]
+    create_args = [vboxmanage, "controlvm" if info.get("VMState") == "running" else "modifyvm", name, "natpf1", rule_value]
+
+    run_local_command(delete_args + ["delete", rule_name], timeout=30)
+    result = run_local_command(create_args, timeout=60)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or result.stdout.strip() or "Failed to configure NAT SSH forwarding.")
+
+    return {
+        "vm_name": name,
+        "already_present": False,
+        "rule": rule_value,
+    }
+
+
+def test_tcp_connect(host: str, port: int, timeout: int = 5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def get_linux_vm_auth() -> tuple[str, dict[str, Any]]:
+    username = (LINUX_VM_CONFIG.get("ssh_user") or "").strip()
+    password = LINUX_VM_CONFIG.get("ssh_password") or ""
+    private_key_path = (LINUX_VM_CONFIG.get("ssh_private_key_path") or "").strip()
+
+    if not username:
+        raise HTTPException(status_code=400, detail="Linux VM SSH username is not configured.")
+
+    auth_kwargs: dict[str, Any] = {
+        "username": username,
+        "look_for_keys": False,
+        "allow_agent": False,
+        "timeout": 15,
+        "banner_timeout": 15,
+        "auth_timeout": 15,
+    }
+
+    if private_key_path:
+        key_path = Path(os.path.expandvars(private_key_path))
+        if not key_path.exists():
+            raise HTTPException(status_code=400, detail=f"Linux VM SSH private key path '{key_path}' does not exist.")
+        auth_kwargs["key_filename"] = str(key_path)
+    elif password:
+        auth_kwargs["password"] = password
+    else:
+        raise HTTPException(status_code=400, detail="Linux VM SSH credentials are not configured. Set a password or private key path in toolserver-config.json.")
+
+    return username, auth_kwargs
+
+
+def connect_linux_vm() -> paramiko.SSHClient:
+    host = str(LINUX_VM_CONFIG.get("ssh_host", "127.0.0.1"))
+    port = int(LINUX_VM_CONFIG.get("ssh_port", 2222))
+    _, auth_kwargs = get_linux_vm_auth()
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, **auth_kwargs)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to connect to Linux VM over SSH: {exc}") from exc
+    return client
+
+
 @app.middleware("http")
 async def auth_and_audit(request: Request, call_next):
     start = time.time()
@@ -203,6 +366,37 @@ class KillProcessRequest(BaseModel):
     sandbox_mode: Literal["standard", "override"] | None = None
 
 
+class VirtualBoxVmRequest(BaseModel):
+    vm_name: str | None = None
+
+
+class LinuxVmShellRequest(BaseModel):
+    command: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+    cwd: str | None = None
+
+
+class LinuxVmPathRequest(BaseModel):
+    path: str
+    max_chars: int = Field(200000, ge=1, le=1000000)
+
+
+class LinuxVmWriteFileRequest(BaseModel):
+    path: str
+    content: str
+    append: bool = False
+
+
+class LinuxVmListDirectoryRequest(BaseModel):
+    path: str
+    max_entries: int = Field(500, ge=1, le=5000)
+
+
+class LinuxVmListProcessesRequest(BaseModel):
+    name_filter: str | None = None
+    limit: int = Field(200, ge=1, le=2000)
+
+
 @app.get("/health", operation_id="get_health")
 def get_health() -> dict[str, Any]:
     return {
@@ -210,6 +404,8 @@ def get_health() -> dict[str, Any]:
         "service": SERVER_CONFIG["name"],
         "sandbox_default": SERVER_CONFIG.get("default_sandbox", "standard"),
         "override_enabled": SERVER_CONFIG.get("override_enabled", False),
+        "linux_vm_enabled": LINUX_VM_CONFIG.get("enabled", False),
+        "linux_vm_provider": LINUX_VM_CONFIG.get("provider"),
     }
 
 
@@ -426,3 +622,160 @@ def kill_process(request: KillProcessRequest) -> dict[str, Any]:
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+
+
+@app.post("/tools/list_virtualbox_vms", operation_id="list_virtualbox_vms")
+def list_virtualbox_vms() -> dict[str, Any]:
+    vboxmanage = find_vboxmanage()
+    result = run_local_command([vboxmanage, "list", "vms"], timeout=30)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or "VBoxManage list vms failed.")
+    running = run_local_command([vboxmanage, "list", "runningvms"], timeout=30)
+    running_names = set()
+    for line in running.stdout.splitlines():
+        if line.startswith('"'):
+            running_names.add(line.split('"')[1])
+    vms = []
+    for line in result.stdout.splitlines():
+        if line.startswith('"'):
+            name = line.split('"')[1]
+            vms.append({"name": name, "running": name in running_names})
+    return {"vms": vms}
+
+
+@app.post("/tools/get_virtualbox_vm_status", operation_id="get_virtualbox_vm_status")
+def get_virtualbox_vm_status(request: VirtualBoxVmRequest) -> dict[str, Any]:
+    return get_linux_vm_status_payload(request.vm_name)
+
+
+@app.post("/tools/ensure_virtualbox_nat_ssh_forward", operation_id="ensure_virtualbox_nat_ssh_forward")
+def ensure_virtualbox_nat_ssh_forward(request: VirtualBoxVmRequest) -> dict[str, Any]:
+    payload = ensure_virtualbox_nat_ssh_forward_impl(request.vm_name)
+    host = str(LINUX_VM_CONFIG.get("ssh_host", "127.0.0.1"))
+    port = int(LINUX_VM_CONFIG.get("ssh_port", 2222))
+    payload["tcp_reachable"] = test_tcp_connect(host, port)
+    return payload
+
+
+@app.post("/tools/test_linux_vm_ssh", operation_id="test_linux_vm_ssh")
+def test_linux_vm_ssh(request: VirtualBoxVmRequest) -> dict[str, Any]:
+    if request.vm_name:
+        get_linux_vm_status_payload(request.vm_name)
+    payload = ensure_virtualbox_nat_ssh_forward_impl(request.vm_name)
+    host = str(LINUX_VM_CONFIG.get("ssh_host", "127.0.0.1"))
+    port = int(LINUX_VM_CONFIG.get("ssh_port", 2222))
+    tcp_ok = test_tcp_connect(host, port)
+    auth_ok = False
+    auth_error = None
+    if tcp_ok:
+        try:
+            client = connect_linux_vm()
+            client.close()
+            auth_ok = True
+        except HTTPException as exc:
+            auth_error = exc.detail
+    return {
+        **payload,
+        "ssh_host": host,
+        "ssh_port": port,
+        "tcp_reachable": tcp_ok,
+        "auth_ok": auth_ok,
+        "auth_error": auth_error,
+        "configured_user": LINUX_VM_CONFIG.get("ssh_user"),
+        "detected_user": LINUX_VM_CONFIG.get("detected_user"),
+    }
+
+
+@app.post("/tools/linux_execute_shell", operation_id="linux_execute_shell")
+def linux_execute_shell(request: LinuxVmShellRequest) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        command = request.command if not request.cwd else f"cd {request.cwd!r} && {request.command}"
+        stdin, stdout, stderr = client.exec_command(command, timeout=request.timeout_sec)
+        exit_code = stdout.channel.recv_exit_status()
+        return {
+            "exit_code": exit_code,
+            "stdout": stdout.read().decode("utf-8", errors="replace"),
+            "stderr": stderr.read().decode("utf-8", errors="replace"),
+        }
+    finally:
+        client.close()
+
+
+@app.post("/tools/linux_read_file", operation_id="linux_read_file")
+def linux_read_file(request: LinuxVmPathRequest) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        sftp = client.open_sftp()
+        with sftp.open(request.path, "r") as handle:
+            content = handle.read().decode("utf-8", errors="replace")
+        attrs = sftp.stat(request.path)
+        if len(content) > request.max_chars:
+            content = content[: request.max_chars] + "\n...<truncated>"
+        return {"path": request.path, "size_bytes": attrs.st_size, "content": content}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
+@app.post("/tools/linux_write_file", operation_id="linux_write_file")
+def linux_write_file(request: LinuxVmWriteFileRequest) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        sftp = client.open_sftp()
+        mode = "a" if request.append else "w"
+        with sftp.open(request.path, mode) as handle:
+            handle.write(request.content)
+        attrs = sftp.stat(request.path)
+        return {"path": request.path, "size_bytes": attrs.st_size, "append": request.append}
+    finally:
+        client.close()
+
+
+@app.post("/tools/linux_list_directory", operation_id="linux_list_directory")
+def linux_list_directory(request: LinuxVmListDirectoryRequest) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        sftp = client.open_sftp()
+        entries = []
+        for item in sftp.listdir_attr(request.path)[: request.max_entries]:
+            entries.append(
+                {
+                    "name": item.filename,
+                    "path": f"{request.path.rstrip('/')}/{item.filename}",
+                    "size_bytes": item.st_size,
+                    "mode": item.st_mode,
+                    "modified_at_epoch": item.st_mtime,
+                }
+            )
+        return {"path": request.path, "entries": entries, "truncated": len(entries) >= request.max_entries}
+    finally:
+        client.close()
+
+
+@app.post("/tools/linux_list_processes", operation_id="linux_list_processes")
+def linux_list_processes(request: LinuxVmListProcessesRequest) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        filter_expr = request.name_filter or ""
+        cmd = "ps -eo pid=,comm=,args= --no-headers"
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=60)
+        exit_code = stdout.channel.recv_exit_status()
+        if exit_code != 0:
+            raise HTTPException(status_code=500, detail=stderr.read().decode("utf-8", errors="replace"))
+        rows = []
+        for line in stdout.read().decode("utf-8", errors="replace").splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            pid, name = parts[0], parts[1]
+            args = parts[2] if len(parts) > 2 else ""
+            if filter_expr and filter_expr.lower() not in name.lower() and filter_expr.lower() not in args.lower():
+                continue
+            rows.append({"pid": int(pid), "name": name, "command_line": args})
+            if len(rows) >= request.limit:
+                break
+        return {"processes": rows, "truncated": len(rows) >= request.limit}
+    finally:
+        client.close()

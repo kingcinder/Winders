@@ -44,6 +44,16 @@ function Get-DefaultStackConfig {
         ToolServerPidFileName = 'toolserver.pid'
         ToolServerConfigFileName = 'toolserver-config.json'
         ToolServerWriteRoots = @()
+        LinuxVmEnabled = $true
+        LinuxVmProvider = 'virtualbox'
+        VirtualBoxVmName = 'kaili'
+        LinuxVmDetectedUser = ''
+        LinuxVmSshHost = '127.0.0.1'
+        LinuxVmSshPort = 2222
+        LinuxVmUser = ''
+        LinuxVmPassword = ''
+        LinuxVmPrivateKeyPath = ''
+        LinuxVmNatRuleName = 'localllm-ssh'
         ContextLength = 4096
         GPULayers = 'auto'
         GPUIndexOverride = ''
@@ -282,6 +292,16 @@ function Validate-StackConfig {
         }
     }
 
+    if ([bool]$Config.LinuxVmEnabled) {
+        $vmPort = [string]$Config.LinuxVmSshPort
+        if (-not ($vmPort -match '^\d+$')) {
+            throw "Invalid config field 'LinuxVmSshPort': value '$vmPort' is not numeric."
+        }
+        if ([int]$vmPort -lt 1 -or [int]$vmPort -gt 65535) {
+            throw "Invalid config field 'LinuxVmSshPort': value '$vmPort' is outside 1-65535."
+        }
+    }
+
     foreach ($field in @('StartupTimeoutSec', 'BackendStartupTimeoutSec', 'UiStartupTimeoutSec', 'ContextLength')) {
         $value = [string]$Config.$field
         if (-not ($value -match '^\d+$')) {
@@ -319,6 +339,15 @@ function Validate-StackConfig {
         }
     }
 
+    if ([bool]$Config.LinuxVmEnabled) {
+        foreach ($field in @('LinuxVmProvider', 'VirtualBoxVmName', 'LinuxVmSshHost', 'LinuxVmNatRuleName')) {
+            $value = [string]$Config.$field
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                throw "Invalid config field '$field': value '$value' must be non-empty."
+            }
+        }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace([string]$Config.GPUIndexOverride)) {
         $gpuValue = [string]$Config.GPUIndexOverride
         if (-not ($gpuValue -match '^\d+$')) {
@@ -327,7 +356,7 @@ function Validate-StackConfig {
     }
 
     $invalidPathChars = [System.IO.Path]::GetInvalidPathChars()
-    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile', 'ToolServerDir', 'ToolServerSrcDir', 'ToolServerVenvDir', 'ToolServerRequirementsPath', 'ToolServerConfigPath', 'ToolServerPidFile', 'ToolServerStdOutLog', 'ToolServerStdErrLog', 'ToolServerAuditLog', 'ToolServerPythonPath', 'ToolServerAppPath')) {
+    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile', 'ToolServerDir', 'ToolServerSrcDir', 'ToolServerVenvDir', 'ToolServerRequirementsPath', 'ToolServerConfigPath', 'ToolServerPidFile', 'ToolServerStdOutLog', 'ToolServerStdErrLog', 'ToolServerAuditLog', 'ToolServerPythonPath', 'ToolServerAppPath', 'LinuxVmPrivateKeyPath')) {
         $value = [string]$Config.$field
         if ($value.IndexOfAny($invalidPathChars) -ge 0) {
             throw "Invalid config field '$field': value '$value' contains invalid path characters."
@@ -1065,6 +1094,18 @@ function Get-ToolServerRuntimeConfig {
                 '(?i)\bbcdedit\b'
             )
         }
+        linux_vm = [ordered]@{
+            enabled = [bool]$Config.LinuxVmEnabled
+            provider = $Config.LinuxVmProvider
+            virtualbox_vm_name = $Config.VirtualBoxVmName
+            detected_user = $Config.LinuxVmDetectedUser
+            ssh_host = $Config.LinuxVmSshHost
+            ssh_port = [int]$Config.LinuxVmSshPort
+            ssh_user = $Config.LinuxVmUser
+            ssh_password = $Config.LinuxVmPassword
+            ssh_private_key_path = $Config.LinuxVmPrivateKeyPath
+            nat_rule_name = $Config.LinuxVmNatRuleName
+        }
     }
 }
 
@@ -1072,6 +1113,22 @@ function Write-ToolServerRuntimeConfig {
     param([pscustomobject]$Config)
 
     $runtimeConfig = Get-ToolServerRuntimeConfig -Config $Config
+    if (Test-Path -LiteralPath $Config.ToolServerConfigPath) {
+        try {
+            $existing = Get-Content -Raw -LiteralPath $Config.ToolServerConfigPath | ConvertFrom-Json
+            if ($existing -and $existing.linux_vm) {
+                foreach ($field in @('detected_user', 'ssh_user', 'ssh_password', 'ssh_private_key_path')) {
+                    $incomingValue = [string]$runtimeConfig.linux_vm.$field
+                    $existingValue = [string]$existing.linux_vm.$field
+                    if ([string]::IsNullOrWhiteSpace($incomingValue) -and -not [string]::IsNullOrWhiteSpace($existingValue)) {
+                        $runtimeConfig.linux_vm.$field = $existingValue
+                    }
+                }
+            }
+        } catch {
+            # Preserve forward progress even if an old runtime file is unreadable.
+        }
+    }
     $runtimeConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $Config.ToolServerConfigPath -Encoding UTF8
 }
 

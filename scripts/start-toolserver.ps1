@@ -42,6 +42,20 @@ function Ensure-ToolServerRuntime {
     }
 }
 
+function Get-StableToolServerStatus {
+    param([int]$Attempts = 5)
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $status = Get-ToolServerStatus -Config $config
+        if ($status.Ownership.Classification -ne 'unknown-port-owner' -or $status.Ownership.Pid -ne 0) {
+            return $status
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    return (Get-ToolServerStatus -Config $config)
+}
+
 if (-not [bool]$config.ToolServerEnabled) {
     Write-StackLog -Config $config -Component 'TOOLSERVER' -Level 'INFO' -Message 'Tool server disabled in config; nothing to start.'
     exit 0
@@ -50,7 +64,7 @@ if (-not [bool]$config.ToolServerEnabled) {
 Write-ToolServerRuntimeConfig -Config $config
 Ensure-ToolServerRuntime
 
-$status = Get-ToolServerStatus -Config $config
+$status = Get-StableToolServerStatus
 if ($status.Ownership.Classification -eq 'unknown-port-owner') {
     $ownerPath = if ($status.Ownership.ExecutablePath) { $status.Ownership.ExecutablePath } else { '<unknown>' }
     Fail-ToolServer "Configured tool server port $($config.ToolServerPort) is already occupied by PID $($status.Ownership.Pid), process '$($status.Ownership.ProcessName)', executable '$ownerPath'."
