@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -283,6 +284,97 @@ def connect_linux_vm() -> paramiko.SSHClient:
     return client
 
 
+def ensure_safe_target_value(value: str, field_name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be non-empty.")
+    if any(ch in normalized for ch in ("\r", "\n", "\x00")):
+        raise HTTPException(status_code=400, detail=f"{field_name} contains invalid control characters.")
+    return normalized
+
+
+def ensure_linux_file_exists(path_value: str, field_name: str) -> str:
+    normalized = ensure_safe_target_value(path_value, field_name)
+    result = run_linux_command(["test", "-f", normalized], timeout_sec=15)
+    if result["exit_code"] != 0:
+        raise HTTPException(status_code=400, detail=f"{field_name} '{normalized}' does not exist in the Kali VM.")
+    return normalized
+
+
+def run_linux_command(
+    argv: list[str],
+    timeout_sec: int = 120,
+    cwd: str | None = None,
+    require_zero_exit: bool = False,
+) -> dict[str, Any]:
+    client = connect_linux_vm()
+    try:
+        command_line = " ".join(shlex.quote(arg) for arg in argv)
+        wrapped_command = command_line if not cwd else f"cd {shlex.quote(cwd)} && {command_line}"
+        stdin, stdout, stderr = client.exec_command(wrapped_command, timeout=timeout_sec)
+        stdin.close()
+        stdout.channel.shutdown_write()
+        stdout_text = stdout.read().decode("utf-8", errors="replace")
+        stderr_text = stderr.read().decode("utf-8", errors="replace")
+        exit_code = stdout.channel.recv_exit_status()
+        if require_zero_exit and exit_code != 0:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "command": wrapped_command,
+                    "exit_code": exit_code,
+                    "stdout": stdout_text,
+                    "stderr": stderr_text,
+                },
+            )
+        return {
+            "command": wrapped_command,
+            "exit_code": exit_code,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        }
+    finally:
+        client.close()
+
+
+def resolve_linux_tool_command(tool_name: str) -> str:
+    result = run_linux_command(["command", "-v", tool_name], timeout_sec=15)
+    if result["exit_code"] != 0 or not result["stdout"].strip():
+        raise HTTPException(status_code=404, detail=f"Kali tool '{tool_name}' is not installed in the VM.")
+    return result["stdout"].splitlines()[0].strip()
+
+
+def assert_linux_tool_installed(tool_name: str) -> str:
+    return resolve_linux_tool_command(tool_name)
+
+
+def get_effective_linux_tool_command(tool_name: str) -> str:
+    command_path = resolve_linux_tool_command(tool_name)
+    if tool_name == "amass":
+        real_path = "/usr/lib/amass/amass"
+        probe = run_linux_command(["test", "-x", real_path], timeout_sec=15)
+        if probe["exit_code"] == 0:
+            return real_path
+    return command_path
+
+
+KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
+    {"operation_id": "kali_run_whois", "tool": "whois", "purpose": "WHOIS and registration data lookup for a domain or IP."},
+    {"operation_id": "kali_run_dig", "tool": "dig", "purpose": "DNS record lookup for a name and record type."},
+    {"operation_id": "kali_run_curl", "tool": "curl", "purpose": "HTTP fetch with explicit method, redirect, and TLS verification options."},
+    {"operation_id": "kali_run_whatweb", "tool": "whatweb", "purpose": "Web stack fingerprinting and technology detection."},
+    {"operation_id": "kali_run_nikto", "tool": "nikto", "purpose": "Web server misconfiguration and known issue scan."},
+    {"operation_id": "kali_run_wapiti", "tool": "wapiti", "purpose": "Web application assessment crawler and vuln checks."},
+    {"operation_id": "kali_run_nmap", "tool": "nmap", "purpose": "Host and service enumeration with bounded options."},
+    {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
+    {"operation_id": "kali_run_httpx", "tool": "httpx", "purpose": "HTTPX client request wrapper for the Kali-installed CLI variant."},
+    {"operation_id": "kali_run_dnsenum", "tool": "dnsenum", "purpose": "Domain DNS enumeration."},
+    {"operation_id": "kali_run_dnsrecon", "tool": "dnsrecon", "purpose": "DNS reconnaissance for a domain."},
+    {"operation_id": "kali_run_gobuster_dir", "tool": "gobuster", "purpose": "Directory brute-force against a specific base URL."},
+    {"operation_id": "kali_run_amass_passive", "tool": "amass", "purpose": "Passive subdomain enumeration."},
+]
+
+
 @app.middleware("http")
 async def auth_and_audit(request: Request, call_next):
     start = time.time()
@@ -397,6 +489,83 @@ class LinuxVmListProcessesRequest(BaseModel):
     limit: int = Field(200, ge=1, le=2000)
 
 
+class KaliWhoisRequest(BaseModel):
+    query: str
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliDigRequest(BaseModel):
+    name: str
+    record_type: str = "A"
+    dns_server: str | None = None
+    short: bool = False
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliCurlRequest(BaseModel):
+    url: str
+    method: Literal["GET", "HEAD"] = "GET"
+    include_headers: bool = True
+    follow_redirects: bool = True
+    verify_tls: bool = True
+    timeout_sec: int = Field(60, ge=1, le=600)
+
+
+class KaliWhatwebRequest(BaseModel):
+    url: str
+    aggression: int = Field(1, ge=1, le=4)
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliNiktoRequest(BaseModel):
+    target_url: str
+    timeout_sec: int = Field(300, ge=1, le=3600)
+
+
+class KaliWapitiRequest(BaseModel):
+    target_url: str
+    scope: Literal["page", "folder", "domain", "url"] = "domain"
+    modules: str = "all,-ssrf"
+    timeout_sec: int = Field(600, ge=1, le=7200)
+
+
+class KaliNmapRequest(BaseModel):
+    target: str
+    ports: str | None = None
+    top_ports: int | None = Field(None, ge=1, le=1000)
+    service_version: bool = True
+    default_scripts: bool = False
+    timeout_sec: int = Field(300, ge=1, le=3600)
+
+
+class KaliSslscanRequest(BaseModel):
+    host: str
+    port: int = Field(443, ge=1, le=65535)
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliHttpxRequest(BaseModel):
+    url: str
+    method: Literal["GET", "HEAD"] = "GET"
+    follow_redirects: bool = True
+    verify_tls: bool = True
+    verbose: bool = False
+    timeout_sec: int = Field(180, ge=1, le=1800)
+
+
+class KaliDomainRequest(BaseModel):
+    domain: str
+    timeout_sec: int = Field(300, ge=1, le=3600)
+
+
+class KaliGobusterDirRequest(BaseModel):
+    base_url: str
+    wordlist_path: str = "/usr/share/wordlists/dirb/common.txt"
+    extensions: list[str] = Field(default_factory=list)
+    threads: int = Field(10, ge=1, le=50)
+    timeout_sec: int = Field(600, ge=1, le=7200)
+
+
 @app.get("/health", operation_id="get_health")
 def get_health() -> dict[str, Any]:
     return {
@@ -407,6 +576,29 @@ def get_health() -> dict[str, Any]:
         "linux_vm_enabled": LINUX_VM_CONFIG.get("enabled", False),
         "linux_vm_provider": LINUX_VM_CONFIG.get("provider"),
     }
+
+
+@app.post("/tools/list_kali_wrappers", operation_id="list_kali_wrappers")
+def list_kali_wrappers() -> dict[str, Any]:
+    wrappers = []
+    for definition in KALI_WRAPPER_DEFINITIONS:
+        installed = False
+        command_path = None
+        try:
+            command_path = get_effective_linux_tool_command(definition["tool"])
+            installed = True
+        except HTTPException:
+            installed = False
+        wrappers.append(
+            {
+                "operation_id": definition["operation_id"],
+                "tool": definition["tool"],
+                "purpose": definition["purpose"],
+                "installed": installed,
+                "command_path": command_path,
+            }
+        )
+    return {"wrappers": wrappers}
 
 
 @app.post("/tools/execute_powershell", operation_id="execute_powershell")
@@ -779,3 +971,143 @@ def linux_list_processes(request: LinuxVmListProcessesRequest) -> dict[str, Any]
         return {"processes": rows, "truncated": len(rows) >= request.limit}
     finally:
         client.close()
+
+
+@app.post("/tools/kali_run_whois", operation_id="kali_run_whois")
+def kali_run_whois(request: KaliWhoisRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("whois")
+    query = ensure_safe_target_value(request.query, "query")
+    return run_linux_command([tool, query], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_dig", operation_id="kali_run_dig")
+def kali_run_dig(request: KaliDigRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("dig")
+    name = ensure_safe_target_value(request.name, "name")
+    record_type = ensure_safe_target_value(request.record_type.upper(), "record_type")
+    argv = [tool]
+    if request.short:
+        argv.append("+short")
+    if request.dns_server:
+        argv.append(f"@{ensure_safe_target_value(request.dns_server, 'dns_server')}")
+    argv.extend([name, record_type])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_curl", operation_id="kali_run_curl")
+def kali_run_curl(request: KaliCurlRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("curl")
+    url = ensure_safe_target_value(request.url, "url")
+    argv = [tool, "--silent", "--show-error", "--max-time", str(request.timeout_sec)]
+    if request.include_headers:
+        argv.append("--include")
+    if request.follow_redirects:
+        argv.append("--location")
+    if not request.verify_tls:
+        argv.append("--insecure")
+    if request.method == "HEAD":
+        argv.append("--head")
+    argv.append(url)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_whatweb", operation_id="kali_run_whatweb")
+def kali_run_whatweb(request: KaliWhatwebRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("whatweb")
+    url = ensure_safe_target_value(request.url, "url")
+    return run_linux_command([tool, f"--aggression={request.aggression}", url], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_nikto", operation_id="kali_run_nikto")
+def kali_run_nikto(request: KaliNiktoRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("nikto")
+    target_url = ensure_safe_target_value(request.target_url, "target_url")
+    return run_linux_command([tool, "-h", target_url, "-ask", "no"], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_wapiti", operation_id="kali_run_wapiti")
+def kali_run_wapiti(request: KaliWapitiRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("wapiti")
+    target_url = ensure_safe_target_value(request.target_url, "target_url")
+    modules = ensure_safe_target_value(request.modules, "modules")
+    return run_linux_command(
+        [tool, "-u", target_url, "--scope", request.scope, "-m", modules, "--format", "txt", "--flush-session"],
+        timeout_sec=request.timeout_sec,
+        require_zero_exit=True,
+    )
+
+
+@app.post("/tools/kali_run_nmap", operation_id="kali_run_nmap")
+def kali_run_nmap(request: KaliNmapRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("nmap")
+    target = ensure_safe_target_value(request.target, "target")
+    argv = [tool]
+    if request.ports:
+        argv.extend(["-p", ensure_safe_target_value(request.ports, "ports")])
+    elif request.top_ports:
+        argv.extend(["--top-ports", str(request.top_ports)])
+    if request.service_version:
+        argv.append("-sV")
+    if request.default_scripts:
+        argv.append("-sC")
+    argv.append(target)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_sslscan", operation_id="kali_run_sslscan")
+def kali_run_sslscan(request: KaliSslscanRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("sslscan")
+    host = ensure_safe_target_value(request.host, "host")
+    return run_linux_command([tool, f"{host}:{request.port}"], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_httpx", operation_id="kali_run_httpx")
+def kali_run_httpx(request: KaliHttpxRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("httpx")
+    url = ensure_safe_target_value(request.url, "url")
+    argv = [tool, url, "--method", request.method, "--timeout", str(request.timeout_sec)]
+    if request.follow_redirects:
+        argv.append("--follow-redirects")
+    if not request.verify_tls:
+        argv.append("--no-verify")
+    if request.verbose:
+        argv.append("--verbose")
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_dnsenum", operation_id="kali_run_dnsenum")
+def kali_run_dnsenum(request: KaliDomainRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("dnsenum")
+    domain = ensure_safe_target_value(request.domain, "domain")
+    return run_linux_command([tool, "--noreverse", domain], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_dnsrecon", operation_id="kali_run_dnsrecon")
+def kali_run_dnsrecon(request: KaliDomainRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("dnsrecon")
+    domain = ensure_safe_target_value(request.domain, "domain")
+    return run_linux_command([tool, "-d", domain], timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_gobuster_dir", operation_id="kali_run_gobuster_dir")
+def kali_run_gobuster_dir(request: KaliGobusterDirRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("gobuster")
+    base_url = ensure_safe_target_value(request.base_url, "base_url")
+    wordlist_path = ensure_linux_file_exists(request.wordlist_path, "wordlist_path")
+    argv = [tool, "dir", "-u", base_url, "-w", wordlist_path, "-t", str(request.threads), "--no-error"]
+    if request.extensions:
+        sanitized = [ensure_safe_target_value(ext, "extensions item").lstrip(".") for ext in request.extensions]
+        argv.extend(["-x", ",".join(sanitized)])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_amass_passive", operation_id="kali_run_amass_passive")
+def kali_run_amass_passive(request: KaliDomainRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("amass")
+    domain = ensure_safe_target_value(request.domain, "domain")
+    timeout_minutes = max(1, min(60, (request.timeout_sec + 59) // 60))
+    return run_linux_command(
+        [tool, "enum", "-passive", "-nocolor", "-silent", "-timeout", str(timeout_minutes), "-d", domain],
+        timeout_sec=request.timeout_sec + 15,
+        require_zero_exit=True,
+    )
