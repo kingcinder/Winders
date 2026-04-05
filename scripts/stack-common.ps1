@@ -270,7 +270,14 @@ function Test-IsAdmin {
 }
 
 function Assert-SupportedPlatform {
-    if (-not $IsWindows) {
+    $runningOnWindows = $true
+    if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+        $runningOnWindows = [bool]$IsWindows
+    } else {
+        $runningOnWindows = ($env:OS -eq 'Windows_NT')
+    }
+
+    if (-not $runningOnWindows) {
         throw 'This stack only supports Windows hosts.'
     }
     if (-not [Environment]::Is64BitOperatingSystem) {
@@ -444,24 +451,24 @@ function Write-StackState {
 }
 
 function Get-ProcessMetadata {
-    param([int]$Pid)
+    param([int]$ProcessId)
 
     try {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid"
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
         if (-not $process) {
             return $null
         }
         return [pscustomobject]@{
-            Pid = $Pid
+            Pid = $ProcessId
             ProcessName = $process.Name
             ExecutablePath = $process.ExecutablePath
             CommandLine = $process.CommandLine
         }
     } catch {
         try {
-            $process = Get-Process -Id $Pid -ErrorAction Stop
+            $process = Get-Process -Id $ProcessId -ErrorAction Stop
             return [pscustomobject]@{
-                Pid = $Pid
+                Pid = $ProcessId
                 ProcessName = $process.ProcessName
                 ExecutablePath = $process.Path
                 CommandLine = $null
@@ -487,7 +494,7 @@ function Get-PortOwner {
     }
 
     if ($connection) {
-        $metadata = Get-ProcessMetadata -Pid $connection.OwningProcess
+        $metadata = Get-ProcessMetadata -ProcessId $connection.OwningProcess
         return [pscustomobject]@{
             Port = $Port
             Pid = $connection.OwningProcess
@@ -504,7 +511,7 @@ function Get-PortOwner {
     }
 
     $pid = [int](($netstat.Line -split '\s+')[-1])
-    $metadata = Get-ProcessMetadata -Pid $pid
+    $metadata = Get-ProcessMetadata -ProcessId $pid
     return [pscustomobject]@{
         Port = $Port
         Pid = $pid
@@ -570,7 +577,7 @@ function Get-BackendOwnership {
         $pidText = (Get-Content -Raw -LiteralPath $Config.BackendPidFile).Trim()
         if ($pidText -match '^\d+$') {
             $pidFilePid = [int]$pidText
-            $pidProcess = Get-ProcessMetadata -Pid $pidFilePid
+            $pidProcess = Get-ProcessMetadata -ProcessId $pidFilePid
             if ($pidProcess -and (Test-ProcessMatchesBackend -ProcessInfo $pidProcess -Config $Config)) {
                 if (-not $portOwner -or $portOwner.Pid -eq $pidFilePid) {
                     return [pscustomobject]@{
@@ -601,7 +608,7 @@ function Get-BackendOwnership {
         }
     }
 
-    $ownerInfo = Get-ProcessMetadata -Pid $portOwner.Pid
+    $ownerInfo = Get-ProcessMetadata -ProcessId $portOwner.Pid
     if ($ownerInfo -and (Test-ProcessMatchesBackend -ProcessInfo $ownerInfo -Config $Config)) {
         return [pscustomobject]@{
             BelongsToStack = $true
@@ -759,7 +766,14 @@ function Get-OpenWebUiContainerState {
         }
     }
 
-    $inspectOutput = & docker inspect $Config.ContainerName 2>$null
+    $previousPreference = $ErrorActionPreference
+    $inspectOutput = $null
+    try {
+        $ErrorActionPreference = 'Continue'
+        $inspectOutput = & docker inspect $Config.ContainerName 2>$null
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
     if ($LASTEXITCODE -ne 0 -or -not $inspectOutput) {
         return [pscustomobject]@{
             Exists = $false
@@ -777,13 +791,18 @@ function Get-OpenWebUiContainerState {
         $healthStatus = $inspect.State.Health.Status
     }
 
+    $labels = @{}
+    if ($inspect.Config.Labels) {
+        $labels = ConvertTo-Hashtable -InputObject $inspect.Config.Labels
+    }
+
     return [pscustomobject]@{
         Exists = $true
         Running = [bool]$inspect.State.Running
         Status = [string]$inspect.State.Status
         HealthStatus = $healthStatus
         Image = [string]$inspect.Config.Image
-        Labels = if ($inspect.Config.Labels) { $inspect.Config.Labels } else { @{} }
+        Labels = $labels
     }
 }
 

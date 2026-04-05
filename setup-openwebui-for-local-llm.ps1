@@ -2,6 +2,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts\stack-common.ps1')
 
 $config = Load-StackConfig
+$configHash = ConvertTo-Hashtable -InputObject $config
+$configHash['ConfigPath'] = 'C:\LocalLLM\config\stack.json'
+$config = Resolve-StackConfig -Config $configHash
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
 Save-StackConfig -Config $config

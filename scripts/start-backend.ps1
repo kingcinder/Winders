@@ -52,8 +52,10 @@ function Start-BackendProcess {
     } else {
         $arguments.Add('-hf')
         $arguments.Add($config.SmokeTestModelRepo)
+        $arguments.Add('-hff')
+        $arguments.Add($config.SmokeTestFile)
         $requestedModel = if ($ModePreference -eq 'local') { $config.LocalModelPath } else { $config.SmokeTestModelRepo }
-        $actualModel = $config.SmokeTestModelRepo
+        $actualModel = "$($config.SmokeTestModelRepo)/$($config.SmokeTestFile)"
     }
 
     $gpuLayersValue = if ([string]::IsNullOrWhiteSpace([string]$config.GPULayers)) { 'auto' } else { [string]$config.GPULayers }

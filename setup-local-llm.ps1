@@ -9,6 +9,7 @@ if (-not (Test-IsAdmin)) {
 
 $config = Load-StackConfig
 $configHash = ConvertTo-Hashtable -InputObject $config
+$configHash['ConfigPath'] = 'C:\LocalLLM\config\stack.json'
 $config = Resolve-StackConfig -Config $configHash
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
@@ -89,6 +90,33 @@ function Test-ExistingRuntimeHealthy {
         return ($LASTEXITCODE -eq 0 -and $deviceOutput)
     } catch {
         return $false
+    }
+}
+
+function Invoke-LlamaBinaryProbe($llamaServerExe) {
+    $probeOut = Join-Path $config.TempDir 'llama-probe.stdout.log'
+    $probeErr = Join-Path $config.TempDir 'llama-probe.stderr.log'
+    if (Test-Path -LiteralPath $probeOut) { Remove-Item -LiteralPath $probeOut -Force }
+    if (Test-Path -LiteralPath $probeErr) { Remove-Item -LiteralPath $probeErr -Force }
+
+    $process = Start-Process -FilePath $llamaServerExe -ArgumentList '--help' -PassThru -Wait -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        StdoutPath = $probeOut
+        StderrPath = $probeErr
+    }
+}
+
+function Ensure-VcRedist {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        throw 'winget is required to install the Microsoft Visual C++ runtime automatically.'
+    }
+
+    Write-InstallLog 'Ensuring Microsoft Visual C++ 2015-2022 x64 redistributable is installed.'
+    & $winget.Source install --id Microsoft.VCRedist.2015+.x64 -e --accept-package-agreements --accept-source-agreements --force
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to install Microsoft Visual C++ 2015-2022 x64 redistributable.'
     }
 }
 
@@ -209,6 +237,20 @@ if ($runtimeHealthy) {
     $null = Detect-GpuIndex -llamaServerExe $llamaServerExe
 }
 
+$probe = Invoke-LlamaBinaryProbe -llamaServerExe $llamaServerExe
+if ($probe.ExitCode -ne 0) {
+    Write-Warn "llama-server.exe probe failed with exit code $($probe.ExitCode). Attempting VC++ runtime repair."
+    Ensure-VcRedist
+    $probe = Invoke-LlamaBinaryProbe -llamaServerExe $llamaServerExe
+    if ($probe.ExitCode -ne 0) {
+        $stderrTail = Get-Content -Path $probe.StderrPath -Tail 40 -ErrorAction SilentlyContinue
+        throw "llama-server.exe failed probe after VC++ runtime repair. ExitCode=$($probe.ExitCode). StderrTail=$($stderrTail -join ' | ')"
+    }
+}
+
+if (-not (Test-Path -LiteralPath $config.GPUIndexStateFile) -or -not $runtimeHealthy) {
+    $null = Detect-GpuIndex -llamaServerExe $llamaServerExe
+}
 $configHash['BackendBinaryPath'] = $llamaServerExe
 $config = Resolve-StackConfig -Config $configHash
 Validate-StackConfig -Config $config

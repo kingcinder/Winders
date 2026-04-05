@@ -77,24 +77,24 @@ $reason = $null
 if (-not $container.Exists) {
     $action = 'recreate'
     $reason = 'container missing'
-} elseif ($container.HealthStatus -eq 'unhealthy') {
-    $action = 'recreate'
-    $reason = 'container unhealthy'
 } elseif ($drift.DriftDetected) {
     $action = 'recreate'
     $reason = ($drift.DriftReasons -join '; ')
-} elseif ($container.Running -and (Test-UiReachable)) {
-    $action = 'reuse'
-    $reason = 'container running and UI reachable'
-} elseif ($container.Running) {
-    $action = 'restart'
-    $reason = 'container running but UI unreachable'
 } elseif ($container.Status -in @('created', 'exited')) {
     $action = 'start'
     $reason = "container stopped in state '$($container.Status)' with matching fingerprint"
 } elseif ($container.Status -eq 'paused') {
     $action = 'resume'
     $reason = 'container paused with matching fingerprint'
+} elseif ($container.HealthStatus -eq 'unhealthy') {
+    $action = 'recreate'
+    $reason = 'container unhealthy'
+} elseif ($container.Running -and (Test-UiReachable)) {
+    $action = 'reuse'
+    $reason = 'container running and UI reachable'
+} elseif ($container.Running) {
+    $action = 'restart'
+    $reason = 'container running but UI unreachable'
 } else {
     $action = 'recreate'
     $reason = "container state '$($container.Status)' cannot be recovered cleanly"
