@@ -606,6 +606,12 @@ function Get-PortOwner {
     }
 
     if ($connection) {
+        if ([int]$connection.OwningProcess -le 0) {
+            $connection = $null
+        }
+    }
+
+    if ($connection) {
         $metadata = Get-ProcessMetadata -ProcessId $connection.OwningProcess
         return [pscustomobject]@{
             Port = $Port
@@ -623,6 +629,9 @@ function Get-PortOwner {
     }
 
     $pid = [int](($netstat.Line -split '\s+')[-1])
+    if ($pid -le 0) {
+        return $null
+    }
     $metadata = Get-ProcessMetadata -ProcessId $pid
     return [pscustomobject]@{
         Port = $Port

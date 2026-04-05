@@ -372,8 +372,11 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_nmap", "tool": "nmap", "purpose": "Host and service enumeration with bounded options."},
     {"operation_id": "kali_run_traceroute", "tool": "traceroute", "purpose": "Route tracing with bounded hops and probe counts."},
     {"operation_id": "kali_run_fping", "tool": "fping", "purpose": "Reachability probe for one or more hosts."},
+    {"operation_id": "kali_run_arp_scan", "tool": "arp-scan", "purpose": "Local network ARP discovery with bounded scope."},
+    {"operation_id": "kali_run_netcat_probe", "tool": "nc", "purpose": "TCP or UDP connectivity probe using netcat zero-I/O mode."},
     {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
     {"operation_id": "kali_run_sslyze", "tool": "sslyze", "purpose": "TLS and HTTP header analysis using SSLyze."},
+    {"operation_id": "kali_run_openssl_s_client", "tool": "openssl", "purpose": "TLS handshake inspection using openssl s_client."},
     {"operation_id": "kali_run_httpx", "tool": "httpx", "purpose": "HTTPX client request wrapper for the Kali-installed CLI variant."},
     {"operation_id": "kali_run_dnsenum", "tool": "dnsenum", "purpose": "Domain DNS enumeration."},
     {"operation_id": "kali_run_dnsrecon", "tool": "dnsrecon", "purpose": "DNS reconnaissance for a domain."},
@@ -593,6 +596,22 @@ class KaliFpingRequest(BaseModel):
     timeout_sec: int = Field(60, ge=1, le=600)
 
 
+class KaliArpScanRequest(BaseModel):
+    targets: list[str] = Field(default_factory=list)
+    interface: str | None = None
+    localnet: bool = True
+    plain: bool = True
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliNetcatProbeRequest(BaseModel):
+    host: str
+    port: int = Field(..., ge=1, le=65535)
+    udp: bool = False
+    timeout_sec: int = Field(10, ge=1, le=120)
+    verbose: bool = True
+
+
 class KaliSslscanRequest(BaseModel):
     host: str
     port: int = Field(443, ge=1, le=65535)
@@ -608,6 +627,16 @@ class KaliSslyzeRequest(BaseModel):
     tlsv1_3: bool = True
     mozilla_config: Literal["modern", "intermediate", "old", "disable"] = "disable"
     timeout_sec: int = Field(240, ge=1, le=1800)
+
+
+class KaliOpenSslSClientRequest(BaseModel):
+    host: str
+    port: int = Field(443, ge=1, le=65535)
+    servername: str | None = None
+    tls_version: Literal["auto", "tls1", "tls1_1", "tls1_2", "tls1_3"] = "auto"
+    show_certs: bool = True
+    brief: bool = True
+    timeout_sec: int = Field(120, ge=1, le=600)
 
 
 class KaliHttpxRequest(BaseModel):
@@ -1186,6 +1215,36 @@ def kali_run_fping(request: KaliFpingRequest) -> dict[str, Any]:
     return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_arp_scan", operation_id="kali_run_arp_scan")
+def kali_run_arp_scan(request: KaliArpScanRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("arp-scan")
+    argv = [tool]
+    if request.interface:
+        argv.extend(["--interface", ensure_safe_target_value(request.interface, "interface")])
+    if request.plain:
+        argv.append("--plain")
+    if request.localnet:
+        argv.append("--localnet")
+    else:
+        if not request.targets:
+            raise HTTPException(status_code=400, detail="targets must contain at least one host when localnet is false.")
+        argv.extend([ensure_safe_target_value(target, "targets item") for target in request.targets])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_netcat_probe", operation_id="kali_run_netcat_probe")
+def kali_run_netcat_probe(request: KaliNetcatProbeRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("nc")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool, "-z", "-w", str(request.timeout_sec)]
+    if request.verbose:
+        argv.append("-v")
+    if request.udp:
+        argv.append("-u")
+    argv.extend([host, str(request.port)])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_nmap", operation_id="kali_run_nmap")
 def kali_run_nmap(request: KaliNmapRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("nmap")
@@ -1230,6 +1289,23 @@ def kali_run_sslyze(request: KaliSslyzeRequest) -> dict[str, Any]:
     if request.tlsv1_3:
         argv.append("--tlsv1_3")
     argv.append(target)
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_openssl_s_client", operation_id="kali_run_openssl_s_client")
+def kali_run_openssl_s_client(request: KaliOpenSslSClientRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("openssl")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool, "s_client", "-connect", f"{host}:{request.port}"]
+    servername = request.servername or host
+    argv.extend(["-servername", ensure_safe_target_value(servername, "servername")])
+    if request.tls_version != "auto":
+        argv.append("-" + request.tls_version)
+    if request.show_certs:
+        argv.append("-showcerts")
+    if request.brief:
+        argv.append("-brief")
+    argv.extend(["-ign_eof", "-no_ign_eof"])
     return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
