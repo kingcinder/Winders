@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$config = Load-StackConfig
+$config = Ensure-ToolServerConfigured -Config (Load-StackConfig)
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
 
@@ -39,6 +39,22 @@ if (-not (Test-DockerDaemonReachable)) {
     Fail-Repair 'Docker daemon not reachable.'
 }
 
+$toolServerStatus = if ([bool]$config.ToolServerEnabled) { Get-ToolServerStatus -Config $config } else { $null }
+if ($toolServerStatus -and $toolServerStatus.Ownership.Classification -eq 'unknown-port-owner') {
+    $ownerPath = if ($toolServerStatus.Ownership.ExecutablePath) { $toolServerStatus.Ownership.ExecutablePath } else { '<unknown>' }
+    Fail-Repair "Tool server port conflict on $($config.ToolServerPort): PID $($toolServerStatus.Ownership.Pid), process '$($toolServerStatus.Ownership.ProcessName)', executable '$ownerPath'."
+}
+
+if ($toolServerStatus -and $toolServerStatus.Ready) {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'OK' -Message 'Tool server already healthy. Leaving it alone.'
+} elseif ($toolServerStatus) {
+    Write-StackLog -Config $config -Component 'REPAIR' -Level 'WARN' -Message 'Tool server unavailable. Repairing tool server only.'
+    & (Join-Path $PSScriptRoot 'start-toolserver.ps1') -StartReason 'repair-toolserver'
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Repair 'Tool server repair failed.'
+    }
+}
+
 $frontendDrift = Get-OpenWebUiDriftStatus -Config $config
 $uiReachable = (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success
 if ($frontendDrift.ContainerState.Exists -and $frontendDrift.ContainerState.Running -and -not $frontendDrift.DriftDetected -and $frontendDrift.ContainerState.HealthStatus -ne 'unhealthy' -and $uiReachable) {
@@ -53,8 +69,9 @@ if ($frontendDrift.ContainerState.Exists -and $frontendDrift.ContainerState.Runn
 
 $finalBackend = Get-BackendStatus -Config $config
 $finalUi = (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success
-if (-not $finalBackend.Ready -or -not $finalUi) {
-    Fail-Repair "Repair completed with unresolved issues. backendReady=$($finalBackend.Ready), uiReachable=$finalUi."
+$finalToolServer = if ([bool]$config.ToolServerEnabled) { Get-ToolServerStatus -Config $config } else { $null }
+if (-not $finalBackend.Ready -or -not $finalUi -or ($finalToolServer -and -not $finalToolServer.Ready)) {
+    Fail-Repair "Repair completed with unresolved issues. backendReady=$($finalBackend.Ready), uiReachable=$finalUi, toolServerReady=$(if ($finalToolServer) { $finalToolServer.Ready } else { $true })."
 }
 
 Write-StackLog -Config $config -Component 'REPAIR' -Level 'OK' -Message 'Stack repair completed successfully.'

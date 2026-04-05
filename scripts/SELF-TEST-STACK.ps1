@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$config = Load-StackConfig
+$config = Ensure-ToolServerConfigured -Config (Load-StackConfig)
 try {
     Validate-StackConfig -Config $config
     Ensure-StackDirectories -Config $config
@@ -48,6 +48,11 @@ Add-Check -Name 'configured container status valid' -Passed $containerValid -Det
 
 $frontendReachable = (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success
 Add-Check -Name 'frontend reachable' -Passed $frontendReachable -Detail $config.FrontendUrl
+
+$toolServer = if ([bool]$config.ToolServerEnabled) { Get-ToolServerStatus -Config $config } else { $null }
+if ($toolServer) {
+    Add-Check -Name 'local tool server reachable' -Passed $toolServer.Ready -Detail $config.ToolServerHealthUrl
+}
 
 $state = Read-StackState -Config $config
 $modeCoherent = $false

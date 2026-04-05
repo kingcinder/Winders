@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$config = Load-StackConfig
+$config = Ensure-ToolServerConfigured -Config (Load-StackConfig)
 try {
     Validate-StackConfig -Config $config
     $configValid = $true
@@ -26,6 +26,7 @@ $frontendContainer = if ($configValid -and $dockerDaemon) { Get-OpenWebUiContain
 $frontendReachable = if ($configValid) { (Test-UrlSuccess -Url $config.FrontendUrl -TimeoutSec 5).Success } else { $false }
 $frontendPortOwner = if ($configValid) { Get-PortOwner -Port $config.FrontendPort } else { $null }
 $localModel = if ($configValid) { Get-ConfiguredLocalModelStatus -Config $config } else { $null }
+$toolServer = if ($configValid -and [bool]$config.ToolServerEnabled) { Get-ToolServerStatus -Config $config } else { $null }
 
 $issuesRed = New-Object System.Collections.Generic.List[string]
 $issuesYellow = New-Object System.Collections.Generic.List[string]
@@ -42,6 +43,9 @@ if ($configValid -and $backendStatus -and $backendOwnership -and $backendOwnersh
 if ($configValid -and $dockerDaemon -and $frontendContainer -and -not $frontendContainer.Exists) { $issuesRed.Add('frontend container absent') }
 if ($configValid -and $dockerDaemon -and $frontendContainer -and $frontendContainer.Exists -and $frontendContainer.Running -and -not $frontendReachable) { $issuesRed.Add('frontend container running but UI unreachable') }
 if ($configValid -and $frontendPortOwner -and $frontendPortOwner.Pid -and ((-not $frontendContainer) -or (-not $frontendContainer.Exists) -or (-not $frontendContainer.Running))) { $issuesRed.Add('frontend port conflict') }
+if ($toolServer -and $toolServer.Ownership.Classification -eq 'unknown-port-owner') { $issuesRed.Add('tool server port conflict') }
+if ($toolServer -and $toolServer.Ownership.Classification -eq 'not-running') { $issuesYellow.Add('local tool server unavailable') }
+if ($toolServer -and $toolServer.Ownership.BelongsToStack -and -not $toolServer.HealthOk) { $issuesYellow.Add('local tool server process running but health failing') }
 if ($state -and $state.BackendMode -eq 'local' -and $localModel -and -not $localModel.Exists) { $issuesRed.Add('local model missing while local mode selected') }
 if ($state -and $state.FallbackTriggered) { $issuesYellow.Add('smoke-test fallback active') }
 
@@ -68,6 +72,9 @@ if ($frontendContainer) {
     Write-Host "Frontend container: $(if ($frontendContainer.Exists) { $frontendContainer.Status } else { 'missing' })"
 }
 Write-Host "Frontend UI: $(if ($frontendReachable) { 'OK' } else { 'FAIL' })"
+if ($toolServer) {
+    Write-Host "Tool server: $(if ($toolServer.Ready) { 'OK' } else { $toolServer.Ownership.Classification })"
+}
 if ($state) {
     Write-Host "Backend mode state: $($state.BackendMode)"
     Write-Host "Fallback active: $($state.FallbackTriggered)"
@@ -101,4 +108,12 @@ if ($frontendPortOwner -and $frontendPortOwner.Pid) {
     Write-Host "PID: $($frontendPortOwner.Pid)"
     Write-Host "Process: $($frontendPortOwner.ProcessName)"
     Write-Host "Executable: $(if ($frontendPortOwner.ExecutablePath) { $frontendPortOwner.ExecutablePath } else { '<unknown>' })"
+}
+
+if ($toolServer -and $toolServer.Ownership.Pid) {
+    Write-Host ''
+    Write-Host 'Tool Server Port Owner'
+    Write-Host "PID: $($toolServer.Ownership.Pid)"
+    Write-Host "Process: $($toolServer.Ownership.ProcessName)"
+    Write-Host "Executable: $(if ($toolServer.Ownership.ExecutablePath) { $toolServer.Ownership.ExecutablePath } else { '<unknown>' })"
 }

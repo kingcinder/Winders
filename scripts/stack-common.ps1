@@ -29,6 +29,21 @@ function Get-DefaultStackConfig {
         BackendPort = 8080
         FrontendHost = '127.0.0.1'
         FrontendPort = 3000
+        ToolServerEnabled = $true
+        ToolServerName = 'Local System Tools'
+        ToolServerHost = '127.0.0.1'
+        ToolServerBindHost = '0.0.0.0'
+        ToolServerDockerHost = 'host.docker.internal'
+        ToolServerPort = 8765
+        ToolServerBearerToken = ''
+        ToolServerDefaultSandbox = 'standard'
+        ToolServerOverrideEnabled = $true
+        ToolServerAuditLogName = 'toolserver-audit.log'
+        ToolServerStdOutLogName = 'toolserver.stdout.log'
+        ToolServerStdErrLogName = 'toolserver.stderr.log'
+        ToolServerPidFileName = 'toolserver.pid'
+        ToolServerConfigFileName = 'toolserver-config.json'
+        ToolServerWriteRoots = @()
         ContextLength = 4096
         GPULayers = 'auto'
         GPUIndexOverride = ''
@@ -150,12 +165,38 @@ function Resolve-StackConfig {
     $resolved.BackendBinaryPath = if ($resolved.ContainsKey('BackendBinaryPath') -and $resolved.BackendBinaryPath) { $resolved.BackendBinaryPath } else { Join-Path $resolved.BinDir 'llama-server.exe' }
     $resolved.OpenWebUiComposeFile = if ($resolved.ContainsKey('OpenWebUiComposeFile') -and $resolved.OpenWebUiComposeFile) { $resolved.OpenWebUiComposeFile } else { Join-Path $resolved.OpenWebUiDir 'compose.yaml' }
     $resolved.OpenWebUiFingerprintFile = if ($resolved.ContainsKey('OpenWebUiFingerprintFile') -and $resolved.OpenWebUiFingerprintFile) { $resolved.OpenWebUiFingerprintFile } else { Join-Path $resolved.StateDir $resolved.OpenWebUiFingerprintFileName }
+    $resolved.ToolServerDir = if ($resolved.ContainsKey('ToolServerDir') -and $resolved.ToolServerDir) { $resolved.ToolServerDir } else { Join-Path $root 'toolserver' }
+    $resolved.ToolServerSrcDir = if ($resolved.ContainsKey('ToolServerSrcDir') -and $resolved.ToolServerSrcDir) { $resolved.ToolServerSrcDir } else { Join-Path $resolved.ToolServerDir 'src' }
+    $resolved.ToolServerVenvDir = if ($resolved.ContainsKey('ToolServerVenvDir') -and $resolved.ToolServerVenvDir) { $resolved.ToolServerVenvDir } else { Join-Path $resolved.ToolServerDir '.venv' }
+    $resolved.ToolServerRequirementsPath = if ($resolved.ContainsKey('ToolServerRequirementsPath') -and $resolved.ToolServerRequirementsPath) { $resolved.ToolServerRequirementsPath } else { Join-Path $resolved.ToolServerDir 'requirements.txt' }
+    $resolved.ToolServerConfigPath = if ($resolved.ContainsKey('ToolServerConfigPath') -and $resolved.ToolServerConfigPath) { $resolved.ToolServerConfigPath } else { Join-Path $resolved.ConfigDir $resolved.ToolServerConfigFileName }
+    $resolved.ToolServerPidFile = if ($resolved.ContainsKey('ToolServerPidFile') -and $resolved.ToolServerPidFile) { $resolved.ToolServerPidFile } else { Join-Path $resolved.StateDir $resolved.ToolServerPidFileName }
+    $resolved.ToolServerStdOutLog = if ($resolved.ContainsKey('ToolServerStdOutLog') -and $resolved.ToolServerStdOutLog) { $resolved.ToolServerStdOutLog } else { Join-Path $resolved.LogsDir $resolved.ToolServerStdOutLogName }
+    $resolved.ToolServerStdErrLog = if ($resolved.ContainsKey('ToolServerStdErrLog') -and $resolved.ToolServerStdErrLog) { $resolved.ToolServerStdErrLog } else { Join-Path $resolved.LogsDir $resolved.ToolServerStdErrLogName }
+    $resolved.ToolServerAuditLog = if ($resolved.ContainsKey('ToolServerAuditLog') -and $resolved.ToolServerAuditLog) { $resolved.ToolServerAuditLog } else { Join-Path $resolved.LogsDir $resolved.ToolServerAuditLogName }
+    $resolved.ToolServerPythonPath = if ($resolved.ContainsKey('ToolServerPythonPath') -and $resolved.ToolServerPythonPath) { $resolved.ToolServerPythonPath } else { Join-Path $resolved.ToolServerVenvDir 'Scripts\python.exe' }
+    $resolved.ToolServerAppPath = if ($resolved.ContainsKey('ToolServerAppPath') -and $resolved.ToolServerAppPath) { $resolved.ToolServerAppPath } else { Join-Path $resolved.ToolServerSrcDir 'toolserver_app.py' }
     $resolved.SmokeTestModelRepo = $smokeRepo
     $resolved.SmokeTestRepo = $smokeRepo
     $resolved.BrowserAutoOpen = $browserAutoOpen
     $resolved.AutoOpenBrowser = $browserAutoOpen
     $resolved.OpenWebUiAuthEnabled = $authEnabled
     $resolved.DisableWebUIAuth = -not $authEnabled
+    $writeRoots = @()
+    if ($resolved.ContainsKey('ToolServerWriteRoots') -and $resolved.ToolServerWriteRoots) {
+        foreach ($item in $resolved.ToolServerWriteRoots) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$item)) {
+                $writeRoots += [string]$item
+            }
+        }
+    }
+    if ($writeRoots.Count -eq 0) {
+        $writeRoots = @($root)
+        if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            $writeRoots += $env:USERPROFILE
+        }
+    }
+    $resolved.ToolServerWriteRoots = @($writeRoots | Select-Object -Unique)
     if (-not $resolved.BackendStartupTimeoutSec) {
         $resolved.BackendStartupTimeoutSec = if ($resolved.BackendHealthTimeoutSec) { $resolved.BackendHealthTimeoutSec } elseif ($resolved.StartupTimeoutSec) { $resolved.StartupTimeoutSec } else { 180 }
     }
@@ -167,6 +208,9 @@ function Resolve-StackConfig {
     $resolved.BackendModelsUrl = "$($resolved.BackendBaseUrl)/v1/models"
     $resolved.FrontendUrl = "http://$($resolved.FrontendHost):$($resolved.FrontendPort)"
     $resolved.BackendApiBaseUrl = "http://host.docker.internal:$($resolved.BackendPort)/v1"
+    $resolved.ToolServerBaseUrl = "http://$($resolved.ToolServerHost):$($resolved.ToolServerPort)"
+    $resolved.ToolServerDockerBaseUrl = "http://$($resolved.ToolServerDockerHost):$($resolved.ToolServerPort)"
+    $resolved.ToolServerHealthUrl = "$($resolved.ToolServerBaseUrl)/health"
 
     return [pscustomobject]$resolved
 }
@@ -202,7 +246,10 @@ function Save-StackConfig {
         'Root','BinDir','ModelsDir','ScriptsDir','LogsDir','ConfigDir','StateDir','OpenWebUiDir','OpenWebUiDataDir',
         'TempDir','ConfigPath','BackendPidFile','GPUIndexStateFile','DeviceDumpFile','BackendBinaryPath',
         'OpenWebUiComposeFile','OpenWebUiFingerprintFile','BackendBaseUrl','BackendHealthUrl','BackendModelsUrl',
-        'FrontendUrl','BackendApiBaseUrl'
+        'FrontendUrl','BackendApiBaseUrl','ToolServerDir','ToolServerSrcDir','ToolServerVenvDir',
+        'ToolServerRequirementsPath','ToolServerConfigPath','ToolServerPidFile','ToolServerStdOutLog',
+        'ToolServerStdErrLog','ToolServerAuditLog','ToolServerPythonPath','ToolServerAppPath',
+        'ToolServerBaseUrl','ToolServerDockerBaseUrl','ToolServerHealthUrl'
     )) {
         $null = $configHash.Remove($derived)
     }
@@ -222,6 +269,16 @@ function Validate-StackConfig {
         }
         if ([int]$value -lt 1 -or [int]$value -gt 65535) {
             throw "Invalid config field '$field': value '$value' is outside 1-65535."
+        }
+    }
+
+    if ([bool]$Config.ToolServerEnabled) {
+        $toolPort = [string]$Config.ToolServerPort
+        if (-not ($toolPort -match '^\d+$')) {
+            throw "Invalid config field 'ToolServerPort': value '$toolPort' is not numeric."
+        }
+        if ([int]$toolPort -lt 1 -or [int]$toolPort -gt 65535) {
+            throw "Invalid config field 'ToolServerPort': value '$toolPort' is outside 1-65535."
         }
     }
 
@@ -247,6 +304,21 @@ function Validate-StackConfig {
         }
     }
 
+    if ([bool]$Config.ToolServerEnabled) {
+        foreach ($field in @(
+            'ToolServerName','ToolServerHost','ToolServerBindHost','ToolServerDockerHost','ToolServerDefaultSandbox',
+            'ToolServerAuditLogName','ToolServerStdOutLogName','ToolServerStdErrLogName','ToolServerPidFileName',
+            'ToolServerConfigFileName','ToolServerDir','ToolServerSrcDir','ToolServerVenvDir',
+            'ToolServerRequirementsPath','ToolServerConfigPath','ToolServerPidFile','ToolServerStdOutLog',
+            'ToolServerStdErrLog','ToolServerAuditLog','ToolServerPythonPath','ToolServerAppPath'
+        )) {
+            $value = [string]$Config.$field
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                throw "Invalid config field '$field': value '$value' must be non-empty."
+            }
+        }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace([string]$Config.GPUIndexOverride)) {
         $gpuValue = [string]$Config.GPUIndexOverride
         if (-not ($gpuValue -match '^\d+$')) {
@@ -255,10 +327,21 @@ function Validate-StackConfig {
     }
 
     $invalidPathChars = [System.IO.Path]::GetInvalidPathChars()
-    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile')) {
+    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile', 'ToolServerDir', 'ToolServerSrcDir', 'ToolServerVenvDir', 'ToolServerRequirementsPath', 'ToolServerConfigPath', 'ToolServerPidFile', 'ToolServerStdOutLog', 'ToolServerStdErrLog', 'ToolServerAuditLog', 'ToolServerPythonPath', 'ToolServerAppPath')) {
         $value = [string]$Config.$field
         if ($value.IndexOfAny($invalidPathChars) -ge 0) {
             throw "Invalid config field '$field': value '$value' contains invalid path characters."
+        }
+    }
+
+    if ([bool]$Config.ToolServerEnabled) {
+        $sandbox = [string]$Config.ToolServerDefaultSandbox
+        if ($sandbox -notin @('standard', 'override')) {
+            throw "Invalid config field 'ToolServerDefaultSandbox': value '$sandbox' must be 'standard' or 'override'."
+        }
+
+        if (-not $Config.ToolServerWriteRoots -or $Config.ToolServerWriteRoots.Count -lt 1) {
+            throw "Invalid config field 'ToolServerWriteRoots': value '$($Config.ToolServerWriteRoots)' must contain at least one writable root."
         }
     }
 }
@@ -288,7 +371,7 @@ function Assert-SupportedPlatform {
 function Ensure-StackDirectories {
     param([pscustomobject]$Config)
 
-    foreach ($path in @($Config.Root, $Config.BinDir, $Config.ModelsDir, $Config.ScriptsDir, $Config.LogsDir, $Config.ConfigDir, $Config.StateDir, $Config.OpenWebUiDir, $Config.OpenWebUiDataDir)) {
+    foreach ($path in @($Config.Root, $Config.BinDir, $Config.ModelsDir, $Config.ScriptsDir, $Config.LogsDir, $Config.ConfigDir, $Config.StateDir, $Config.OpenWebUiDir, $Config.OpenWebUiDataDir, $Config.ToolServerDir, $Config.ToolServerSrcDir)) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
 }
@@ -706,6 +789,8 @@ function Stop-StackBackendProcess {
 function Get-OpenWebUiFingerprintInputs {
     param([pscustomobject]$Config)
 
+    $toolServerConnections = @(Get-OpenWebUiToolServerConnections -Config $Config)
+
     return [ordered]@{
         DockerImage = $Config.DockerImage
         ContainerName = $Config.ContainerName
@@ -718,6 +803,7 @@ function Get-OpenWebUiFingerprintInputs {
         BackendApiBaseUrl = $Config.BackendApiBaseUrl
         OpenAiApiKey = $Config.OpenAiApiKey
         GlobalLogLevel = $Config.GlobalLogLevel
+        ToolServerConnections = $toolServerConnections
     }
 }
 
@@ -729,6 +815,8 @@ function Get-OpenWebUiComposeContent {
 
     $dataDirForDocker = $Config.OpenWebUiDataDir -replace '\\', '/'
     $authValue = if ($Config.OpenWebUiAuthEnabled) { 'true' } else { 'false' }
+    $toolServerConnections = @(Get-OpenWebUiToolServerConnections -Config $Config)
+    $toolServerConnectionsJson = (ConvertTo-Json -InputObject $toolServerConnections -Depth 10 -Compress) -replace "'", "''"
 
     return @"
 services:
@@ -739,10 +827,11 @@ services:
     ports:
       - "$($Config.FrontendHost):$($Config.FrontendPort):8080"
     environment:
-      - OPENAI_API_BASE_URL=$($Config.BackendApiBaseUrl)
-      - OPENAI_API_KEY=$($Config.OpenAiApiKey)
-      - WEBUI_AUTH=$authValue
-      - GLOBAL_LOG_LEVEL=$($Config.GlobalLogLevel)
+      OPENAI_API_BASE_URL: "$($Config.BackendApiBaseUrl)"
+      OPENAI_API_KEY: "$($Config.OpenAiApiKey)"
+      WEBUI_AUTH: "$authValue"
+      GLOBAL_LOG_LEVEL: "$($Config.GlobalLogLevel)"
+      TOOL_SERVER_CONNECTIONS: '$toolServerConnectionsJson'
     extra_hosts:
       - "host.docker.internal:host-gateway"
     labels:
@@ -750,6 +839,32 @@ services:
     volumes:
       - "${dataDirForDocker}:/app/backend/data"
 "@
+}
+
+function Get-OpenWebUiToolServerConnections {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.ToolServerEnabled) {
+        return @()
+    }
+
+    return @(
+        [ordered]@{
+            type = 'openapi'
+            url = $Config.ToolServerDockerBaseUrl
+            path = 'openapi.json'
+            auth_type = 'bearer'
+            key = $Config.ToolServerBearerToken
+            info = [ordered]@{
+                id = 'local-system-tools'
+                name = $Config.ToolServerName
+                description = 'Local-only host tools with standard sandboxing and explicit override support.'
+            }
+            config = [ordered]@{
+                enable = $true
+            }
+        }
+    )
 }
 
 function Get-OpenWebUiContainerState {
@@ -862,6 +977,281 @@ function Deploy-RepoScripts {
     foreach ($file in Get-ChildItem -LiteralPath $RepoScriptsDir -File) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $InstallScriptsDir $file.Name) -Force
     }
+}
+
+function Deploy-RepoDirectory {
+    param(
+        [string]$SourceDir,
+        [string]$DestinationDir
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceDir)) {
+        throw "Source directory '$SourceDir' does not exist."
+    }
+
+    New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+    Copy-Item -Path (Join-Path $SourceDir '*') -Destination $DestinationDir -Recurse -Force
+}
+
+function New-RandomHexToken {
+    param([int]$Bytes = 32)
+
+    $buffer = New-Object byte[] $Bytes
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($buffer)
+    return -join ($buffer | ForEach-Object { $_.ToString('x2') })
+}
+
+function Ensure-ToolServerConfigured {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.ToolServerEnabled) {
+        return $Config
+    }
+
+    $configHash = ConvertTo-Hashtable -InputObject $Config
+    $changed = $false
+    if ([string]::IsNullOrWhiteSpace([string]$configHash.ToolServerBearerToken)) {
+        $configHash.ToolServerBearerToken = New-RandomHexToken
+        $changed = $true
+    }
+
+    if (-not $configHash.ContainsKey('ToolServerWriteRoots') -or -not $configHash.ToolServerWriteRoots -or $configHash.ToolServerWriteRoots.Count -lt 1) {
+        $configHash.ToolServerWriteRoots = @($Config.ToolServerWriteRoots)
+        $changed = $true
+    }
+
+    if (-not $changed) {
+        return $Config
+    }
+
+    $resolved = Resolve-StackConfig -Config $configHash
+    Validate-StackConfig -Config $resolved
+    Save-StackConfig -Config $resolved
+    return $resolved
+}
+
+function Get-ToolServerRuntimeConfig {
+    param([pscustomobject]$Config)
+
+    return [ordered]@{
+        server = [ordered]@{
+            name = $Config.ToolServerName
+            bind_host = $Config.ToolServerBindHost
+            host = $Config.ToolServerHost
+            port = [int]$Config.ToolServerPort
+            bearer_token = $Config.ToolServerBearerToken
+            default_sandbox = $Config.ToolServerDefaultSandbox
+            override_enabled = [bool]$Config.ToolServerOverrideEnabled
+            audit_log_path = $Config.ToolServerAuditLog
+        }
+        sandbox = [ordered]@{
+            write_roots = @($Config.ToolServerWriteRoots)
+            protected_roots = @(
+                'C:\Windows',
+                'C:\Program Files',
+                'C:\Program Files (x86)',
+                'C:\ProgramData'
+            )
+            destructive_command_patterns = @(
+                '(?i)\bRemove-Item\b.*-Recurse',
+                '(?i)\brd\b\s+/s',
+                '(?i)\bdel\b\s+/[pqsf]*',
+                '(?i)\bformat\b',
+                '(?i)\bdiskpart\b',
+                '(?i)\bshutdown\b',
+                '(?i)\bRestart-Computer\b',
+                '(?i)\bStop-Computer\b',
+                '(?i)\bsc\b\s+delete\b',
+                '(?i)\bbcdedit\b'
+            )
+        }
+    }
+}
+
+function Write-ToolServerRuntimeConfig {
+    param([pscustomobject]$Config)
+
+    $runtimeConfig = Get-ToolServerRuntimeConfig -Config $Config
+    $runtimeConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $Config.ToolServerConfigPath -Encoding UTF8
+}
+
+function Get-ToolServerPythonCommand {
+    param([pscustomobject]$Config)
+
+    if (Test-Path -LiteralPath $Config.ToolServerPythonPath) {
+        return [pscustomobject]@{
+            FilePath = $Config.ToolServerPythonPath
+            ArgumentList = @()
+        }
+    }
+
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        return [pscustomobject]@{
+            FilePath = $py.Source
+            ArgumentList = @('-3')
+        }
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        return [pscustomobject]@{
+            FilePath = $python.Source
+            ArgumentList = @()
+        }
+    }
+
+    throw 'Python launcher not found. Install Python 3 first.'
+}
+
+function Test-ProcessMatchesToolServer {
+    param(
+        [pscustomobject]$ProcessInfo,
+        [pscustomobject]$Config
+    )
+
+    if (-not $ProcessInfo) {
+        return $false
+    }
+
+    $expectedPythonPath = [System.IO.Path]::GetFullPath($Config.ToolServerPythonPath)
+    $actualPath = $null
+    if ($ProcessInfo.ExecutablePath) {
+        try {
+            $actualPath = [System.IO.Path]::GetFullPath($ProcessInfo.ExecutablePath)
+        } catch {
+            $actualPath = $ProcessInfo.ExecutablePath
+        }
+    }
+
+    $cmd = [string]$ProcessInfo.CommandLine
+    $pathMatches = ($actualPath -and $actualPath -ieq $expectedPythonPath)
+    $cmdMentionsApp = ($cmd -and (($cmd -like "*$($Config.ToolServerAppPath)*") -or ($cmd -like "*$($Config.ToolServerDir)*")))
+    $portMatches = ($cmd -and ($cmd -match "(?i)(?:--port|--server-port)\s+([0-9]+)") -and ([int]$Matches[1] -eq [int]$Config.ToolServerPort))
+
+    return (($pathMatches -or $cmdMentionsApp) -and ($portMatches -or $cmdMentionsApp))
+}
+
+function Get-ToolServerOwnership {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.ToolServerEnabled) {
+        return [pscustomobject]@{
+            BelongsToStack = $false
+            Classification = 'disabled'
+            Source = 'config'
+            Pid = $null
+            ProcessName = $null
+            ExecutablePath = $null
+            CommandLine = $null
+            Message = 'Tool server disabled in config.'
+        }
+    }
+
+    $portOwner = Get-PortOwner -Port ([int]$Config.ToolServerPort)
+
+    if (Test-Path -LiteralPath $Config.ToolServerPidFile) {
+        $pidText = (Get-Content -Raw -LiteralPath $Config.ToolServerPidFile).Trim()
+        if ($pidText -match '^\d+$') {
+            $pidProcess = Get-ProcessMetadata -ProcessId ([int]$pidText)
+            if ($pidProcess -and (Test-ProcessMatchesToolServer -ProcessInfo $pidProcess -Config $Config)) {
+                if (-not $portOwner -or $portOwner.Pid -eq $pidProcess.Pid) {
+                    return [pscustomobject]@{
+                        BelongsToStack = $true
+                        Classification = 'our-toolserver'
+                        Source = 'pid-file'
+                        Pid = $pidProcess.Pid
+                        ProcessName = $pidProcess.ProcessName
+                        ExecutablePath = $pidProcess.ExecutablePath
+                        CommandLine = $pidProcess.CommandLine
+                        Message = 'Tool server ownership confirmed by valid PID file.'
+                    }
+                }
+            }
+        }
+    }
+
+    if (-not $portOwner) {
+        return [pscustomobject]@{
+            BelongsToStack = $false
+            Classification = 'not-running'
+            Source = 'port-owner'
+            Pid = $null
+            ProcessName = $null
+            ExecutablePath = $null
+            CommandLine = $null
+            Message = 'No process owns the configured tool server port.'
+        }
+    }
+
+    $ownerInfo = Get-ProcessMetadata -ProcessId $portOwner.Pid
+    if ($ownerInfo -and (Test-ProcessMatchesToolServer -ProcessInfo $ownerInfo -Config $Config)) {
+        return [pscustomobject]@{
+            BelongsToStack = $true
+            Classification = 'our-toolserver'
+            Source = 'port-owner'
+            Pid = $ownerInfo.Pid
+            ProcessName = $ownerInfo.ProcessName
+            ExecutablePath = $ownerInfo.ExecutablePath
+            CommandLine = $ownerInfo.CommandLine
+            Message = 'Tool server ownership confirmed by configured port and executable path.'
+        }
+    }
+
+    return [pscustomobject]@{
+        BelongsToStack = $false
+        Classification = 'unknown-port-owner'
+        Source = 'port-owner'
+        Pid = $portOwner.Pid
+        ProcessName = $portOwner.ProcessName
+        ExecutablePath = $portOwner.ExecutablePath
+        CommandLine = $portOwner.CommandLine
+        Message = 'An unknown process owns the configured tool server port.'
+    }
+}
+
+function Get-ToolServerStatus {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.ToolServerEnabled) {
+        return [pscustomobject]@{
+            Enabled = $false
+            Ownership = Get-ToolServerOwnership -Config $Config
+            HealthOk = $false
+            Ready = $false
+            Error = 'disabled'
+        }
+    }
+
+    $ownership = Get-ToolServerOwnership -Config $Config
+    $health = Test-UrlSuccess -Url $Config.ToolServerHealthUrl -TimeoutSec 5
+
+    return [pscustomobject]@{
+        Enabled = $true
+        Ownership = $ownership
+        HealthOk = [bool]$health.Success
+        Ready = ($ownership.BelongsToStack -and [bool]$health.Success)
+        StatusCode = $health.StatusCode
+        Error = $health.Error
+    }
+}
+
+function Wait-ForToolServerReady {
+    param(
+        [pscustomobject]$Config,
+        [int]$TimeoutSec = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $status = Get-ToolServerStatus -Config $Config
+        if ($status.Ready) {
+            return $status
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    return (Get-ToolServerStatus -Config $Config)
 }
 
 function Write-CmdWrapper {

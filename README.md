@@ -5,6 +5,7 @@ Winders builds a rerunnable Windows local-LLM stack under `C:\LocalLLM` for:
 - `llama.cpp` backend
 - Vulkan on Windows x64
 - Open WebUI frontend
+- local OpenAPI tool server for host control
 - local-only operation
 
 ## Primary bootstrap
@@ -28,6 +29,9 @@ After install, the working scripts live under `C:\LocalLLM\scripts`:
 - `REPAIR-STACK.ps1`
 - `status-stack.ps1`
 - `SELF-TEST-STACK.ps1`
+- `START-TOOLSERVER.cmd`
+- `STOP-TOOLSERVER.cmd`
+- `status-toolserver.ps1`
 
 Self-test:
 
@@ -39,6 +43,8 @@ powershell -ExecutionPolicy Bypass -File C:\LocalLLM\scripts\SELF-TEST-STACK.ps1
 
 - Backend success requires both `/health` and `/v1/models`.
 - Open WebUI reuses a healthy matching container and only recreates on missing container, drift, unhealthy state, or failed recovery.
+- Open WebUI tool access is provided by a locally hosted OpenAPI server on this machine. No paid API or external runtime service is required.
+- The local tool server defaults to `standard` sandbox mode and supports explicit `override` mode for broader host mutation.
 - Repair prefers verify, then reuse, then targeted repair of only the broken component.
 - Backend ownership distinguishes this stack from unrelated `llama-server` processes before any stop or repair action.
 

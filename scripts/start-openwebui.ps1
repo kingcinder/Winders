@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'stack-common.ps1')
 
-$config = Load-StackConfig
+$config = Ensure-ToolServerConfigured -Config (Load-StackConfig)
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
 
@@ -57,6 +57,13 @@ if (-not (Test-DockerDaemonReachable)) {
 $backend = Get-BackendStatus -Config $config
 if (-not $backend.Ready) {
     Fail-Ui "Backend is not ready. /health=$($backend.HealthOk), /v1/models=$($backend.ModelsOk)."
+}
+
+if ([bool]$config.ToolServerEnabled) {
+    & (Join-Path $PSScriptRoot 'start-toolserver.ps1') -StartReason 'openwebui-dependency'
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Ui 'Tool server dependency failed to start.'
+    }
 }
 
 $drift = Get-OpenWebUiDriftStatus -Config $config

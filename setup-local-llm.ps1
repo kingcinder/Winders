@@ -7,10 +7,11 @@ if (-not (Test-IsAdmin)) {
     throw 'Administrator rights are required to install under C:\LocalLLM. Re-run in elevated PowerShell.'
 }
 
-$config = Load-StackConfig
+$config = Ensure-ToolServerConfigured -Config (Load-StackConfig)
 $configHash = ConvertTo-Hashtable -InputObject $config
 $configHash['ConfigPath'] = 'C:\LocalLLM\config\stack.json'
 $config = Resolve-StackConfig -Config $configHash
+$config = Ensure-ToolServerConfigured -Config $config
 Validate-StackConfig -Config $config
 Ensure-StackDirectories -Config $config
 
@@ -230,6 +231,12 @@ if ($runtimeHealthy) {
         throw 'Staged bin.new does not contain llama-server.exe.'
     }
 
+    $backendOwnership = Get-BackendOwnership -Config $config
+    if ($backendOwnership.BelongsToStack) {
+        Write-InstallLog "Stopping stack-owned backend PID $($backendOwnership.Pid) before promoting refreshed runtime."
+        $null = Stop-StackBackendProcess -Config $config
+    }
+
     Write-InstallLog "Promoting staged bin from $stageDir into $($config.BinDir)."
     Promote-StagedBin -StageDir $stageDir -BinDir $config.BinDir
 
@@ -256,6 +263,8 @@ $config = Resolve-StackConfig -Config $configHash
 Validate-StackConfig -Config $config
 Save-StackConfig -Config $config
 Deploy-RepoScripts -RepoScriptsDir (Join-Path $PSScriptRoot 'scripts') -InstallScriptsDir $config.ScriptsDir
+Deploy-RepoDirectory -SourceDir (Join-Path $PSScriptRoot 'toolserver') -DestinationDir $config.ToolServerDir
+Write-ToolServerRuntimeConfig -Config $config
 
 $startSmoke = @"
 @echo off
@@ -302,6 +311,8 @@ Start scripts:
   $($config.ScriptsDir)\START-STACK.cmd
   $($config.ScriptsDir)\REPAIR-STACK.cmd
   $($config.ScriptsDir)\STATUS-STACK.cmd
+  $($config.ScriptsDir)\START-TOOLSERVER.cmd
+  $($config.ScriptsDir)\STATUS-TOOLSERVER.cmd
   $selfTestCmd
 
 Notes:
@@ -316,6 +327,10 @@ Notes:
   - Backend readiness requires both:
     $($config.BackendHealthUrl)
     $($config.BackendModelsUrl)
+  - Local tool server health endpoint:
+    $($config.ToolServerHealthUrl)
+  - Open WebUI consumes the local tool server through:
+    $($config.ToolServerDockerBaseUrl)
 "@
 
 $startSmoke | Set-Content -Path (Join-Path $config.ScriptsDir 'START-QWEN-SMOKETEST.cmd') -Encoding ASCII
@@ -326,6 +341,9 @@ Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'START-STACK.cmd') -PowerSh
 Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'REPAIR-STACK.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\REPAIR-STACK.ps1`""
 Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'STATUS-STACK.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\status-stack.ps1`""
 Write-CmdWrapper -Path $selfTestCmd -PowerShellArguments "-File `"$($config.ScriptsDir)\SELF-TEST-STACK.ps1`""
+Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'START-TOOLSERVER.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\start-toolserver.ps1`""
+Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'STOP-TOOLSERVER.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\stop-toolserver.ps1`""
+Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'STATUS-TOOLSERVER.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\status-toolserver.ps1`""
 $readme | Set-Content -Path (Join-Path $config.Root 'README.txt') -Encoding UTF8
 
 $desktop = [Environment]::GetFolderPath('Desktop')
@@ -337,7 +355,10 @@ foreach ($shortcut in @(
     @{ Name = 'Local LLM - Start Stack.lnk'; Target = Join-Path $config.ScriptsDir 'START-STACK.cmd' },
     @{ Name = 'Local LLM - Repair Stack.lnk'; Target = Join-Path $config.ScriptsDir 'REPAIR-STACK.cmd' },
     @{ Name = 'Local LLM - Status Stack.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-STACK.cmd' },
-    @{ Name = 'Local LLM - Self Test.lnk'; Target = $selfTestCmd }
+    @{ Name = 'Local LLM - Self Test.lnk'; Target = $selfTestCmd },
+    @{ Name = 'Local LLM - Start Tool Server.lnk'; Target = Join-Path $config.ScriptsDir 'START-TOOLSERVER.cmd' },
+    @{ Name = 'Local LLM - Stop Tool Server.lnk'; Target = Join-Path $config.ScriptsDir 'STOP-TOOLSERVER.cmd' },
+    @{ Name = 'Local LLM - Tool Server Status.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-TOOLSERVER.cmd' }
 )) {
     $sc = $wsh.CreateShortcut((Join-Path $desktop $shortcut.Name))
     $sc.TargetPath = $shortcut.Target
