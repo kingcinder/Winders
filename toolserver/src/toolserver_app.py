@@ -409,14 +409,18 @@ KALI_WRAPPER_DEFINITIONS: list[dict[str, str]] = [
     {"operation_id": "kali_run_tcpdump_capture", "tool": "tcpdump", "purpose": "Bounded packet capture to a pcap file."},
     {"operation_id": "kali_run_tshark_summary", "tool": "tshark", "purpose": "Packet summary view for a pcap artifact."},
     {"operation_id": "kali_run_tshark_protocol_hierarchy", "tool": "tshark", "purpose": "Protocol hierarchy statistics for a pcap artifact."},
+    {"operation_id": "kali_run_tshark_conversations", "tool": "tshark", "purpose": "Conversation statistics for a pcap artifact."},
+    {"operation_id": "kali_run_tshark_fields", "tool": "tshark", "purpose": "Field extraction from a pcap artifact."},
     {"operation_id": "kali_run_sslscan", "tool": "sslscan", "purpose": "TLS cipher and certificate inspection."},
     {"operation_id": "kali_run_sslyze", "tool": "sslyze", "purpose": "TLS and HTTP header analysis using SSLyze."},
     {"operation_id": "kali_run_openssl_s_client", "tool": "openssl", "purpose": "TLS handshake inspection using openssl s_client."},
     {"operation_id": "kali_run_httpx", "tool": "httpx", "purpose": "HTTPX client request wrapper for the Kali-installed CLI variant."},
     {"operation_id": "kali_run_dnsenum", "tool": "dnsenum", "purpose": "Domain DNS enumeration."},
     {"operation_id": "kali_run_dnsrecon", "tool": "dnsrecon", "purpose": "DNS reconnaissance for a domain."},
+    {"operation_id": "kali_run_enum4linux_basic", "tool": "enum4linux", "purpose": "Basic SMB enumeration using enum4linux."},
     {"operation_id": "kali_run_smbclient_list_shares", "tool": "smbclient", "purpose": "List SMB shares on a specific host and port."},
     {"operation_id": "kali_run_smbclient_list_path", "tool": "smbclient", "purpose": "List contents of a specific SMB share path."},
+    {"operation_id": "kali_run_smbclient_get_file", "tool": "smbclient", "purpose": "Retrieve a file from an SMB share into a local artifact path."},
     {"operation_id": "kali_run_gobuster_dir", "tool": "gobuster", "purpose": "Directory brute-force against a specific base URL."},
     {"operation_id": "kali_run_amass_passive", "tool": "amass", "purpose": "Passive subdomain enumeration."},
 ]
@@ -673,6 +677,23 @@ class KaliTsharkProtocolHierarchyRequest(BaseModel):
     timeout_sec: int = Field(120, ge=1, le=1800)
 
 
+class KaliTsharkConversationsRequest(BaseModel):
+    pcap_path: str
+    conversation_type: Literal["tcp", "udp", "ip", "eth"] = "tcp"
+    display_filter: str | None = None
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
+class KaliTsharkFieldsRequest(BaseModel):
+    pcap_path: str
+    fields: list[str]
+    max_packets: int = Field(20, ge=1, le=500)
+    display_filter: str | None = None
+    separator: Literal["tab", "comma", "space"] = "tab"
+    include_header: bool = True
+    timeout_sec: int = Field(120, ge=1, le=1800)
+
+
 class KaliSslscanRequest(BaseModel):
     host: str
     port: int = Field(443, ge=1, le=65535)
@@ -726,6 +747,25 @@ class KaliSmbclientAuthRequest(BaseModel):
 class KaliSmbclientListPathRequest(KaliSmbclientAuthRequest):
     share: str
     remote_path: str = "."
+
+
+class KaliSmbclientGetFileRequest(KaliSmbclientAuthRequest):
+    share: str
+    remote_path: str
+    local_output_path: str | None = None
+
+
+class KaliEnum4linuxBasicRequest(BaseModel):
+    host: str
+    username: str | None = None
+    password: str | None = None
+    users: bool = False
+    shares: bool = True
+    groups: bool = False
+    password_policy: bool = True
+    os_info: bool = False
+    rid_cycle: bool = False
+    timeout_sec: int = Field(180, ge=1, le=1800)
 
 
 class KaliGobusterDirRequest(BaseModel):
@@ -1376,6 +1416,31 @@ def kali_run_tshark_protocol_hierarchy(request: KaliTsharkProtocolHierarchyReque
     return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
 
 
+@app.post("/tools/kali_run_tshark_conversations", operation_id="kali_run_tshark_conversations")
+def kali_run_tshark_conversations(request: KaliTsharkConversationsRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("tshark")
+    pcap_path = ensure_linux_file_exists(request.pcap_path, "pcap_path")
+    argv = [tool, "-r", pcap_path, "-q", "-z", f"conv,{request.conversation_type}"]
+    if request.display_filter:
+        argv.extend(["-Y", ensure_safe_target_value(request.display_filter, "display_filter")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_tshark_fields", operation_id="kali_run_tshark_fields")
+def kali_run_tshark_fields(request: KaliTsharkFieldsRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("tshark")
+    pcap_path = ensure_linux_file_exists(request.pcap_path, "pcap_path")
+    if not request.fields:
+        raise HTTPException(status_code=400, detail="fields must contain at least one tshark field.")
+    separator_value = {"tab": "/t", "comma": ",", "space": "/s"}[request.separator]
+    argv = [tool, "-r", pcap_path, "-n", "-T", "fields", "-c", str(request.max_packets), f"-Eheader={'y' if request.include_header else 'n'}", f"-Eseparator={separator_value}"]
+    if request.display_filter:
+        argv.extend(["-Y", ensure_safe_target_value(request.display_filter, "display_filter")])
+    for field in request.fields:
+        argv.extend(["-e", ensure_safe_target_value(field, "fields item")])
+    return run_linux_command(argv, timeout_sec=request.timeout_sec, require_zero_exit=True)
+
+
 @app.post("/tools/kali_run_nmap", operation_id="kali_run_nmap")
 def kali_run_nmap(request: KaliNmapRequest) -> dict[str, Any]:
     tool = get_effective_linux_tool_command("nmap")
@@ -1486,6 +1551,60 @@ def kali_run_smbclient_list_path(request: KaliSmbclientListPathRequest) -> dict[
     argv = [tool, f"//{host}/{share}", "-p", str(request.port), "-g", "-t", str(request.timeout_sec), "-c", f'ls "{remote_path}"']
     argv.extend(build_smbclient_auth_args(request.username, request.password, request.workgroup))
     return run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+
+
+@app.post("/tools/kali_run_smbclient_get_file", operation_id="kali_run_smbclient_get_file")
+def kali_run_smbclient_get_file(request: KaliSmbclientGetFileRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("smbclient")
+    host = ensure_safe_target_value(request.host, "host")
+    share = ensure_safe_target_value(request.share, "share")
+    remote_path = ensure_safe_target_value(request.remote_path, "remote_path")
+    if request.local_output_path:
+        local_output_path = ensure_safe_target_value(request.local_output_path, "local_output_path")
+        ensure_linux_directory(posixpath.dirname(local_output_path) or "/tmp", "local_output_parent")
+    else:
+        remote_name = posixpath.basename(remote_path) or "smb-file.bin"
+        suffix = posixpath.splitext(remote_name)[1] or ".bin"
+        local_output_path = build_linux_artifact_path("smbclient-get", suffix)
+    argv = [tool, f"//{host}/{share}", "-p", str(request.port), "-g", "-t", str(request.timeout_sec), "-c", f'get "{remote_path}" "{local_output_path}"']
+    argv.extend(build_smbclient_auth_args(request.username, request.password, request.workgroup))
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=True)
+    stat_result = run_linux_command(["stat", "-c", "%s", local_output_path], timeout_sec=15, require_zero_exit=True)
+    return {
+        **result,
+        "local_output_path": local_output_path,
+        "size_bytes": int((stat_result["stdout"] or "0").strip() or "0"),
+    }
+
+
+@app.post("/tools/kali_run_enum4linux_basic", operation_id="kali_run_enum4linux_basic")
+def kali_run_enum4linux_basic(request: KaliEnum4linuxBasicRequest) -> dict[str, Any]:
+    tool = get_effective_linux_tool_command("enum4linux")
+    host = ensure_safe_target_value(request.host, "host")
+    argv = [tool]
+    if request.users:
+        argv.append("-U")
+    if request.shares:
+        argv.append("-S")
+    if request.groups:
+        argv.append("-G")
+    if request.password_policy:
+        argv.append("-P")
+    if request.os_info:
+        argv.append("-o")
+    if request.rid_cycle:
+        argv.append("-r")
+    if not any([request.users, request.shares, request.groups, request.password_policy, request.os_info, request.rid_cycle]):
+        argv.append("-a")
+    if request.username:
+        argv.extend(["-u", ensure_safe_target_value(request.username, "username")])
+    if request.password is not None:
+        argv.extend(["-p", request.password])
+    argv.append(host)
+    result = run_linux_command(argv, timeout_sec=request.timeout_sec + 10, require_zero_exit=False)
+    if result["exit_code"] not in (0, 1):
+        raise HTTPException(status_code=500, detail=result)
+    return result
 
 
 @app.post("/tools/kali_run_gobuster_dir", operation_id="kali_run_gobuster_dir")
