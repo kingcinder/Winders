@@ -200,7 +200,7 @@ Write-StackState -Config $config -Updates @{
 }
 
 if ($config.BrowserAutoOpen) {
-    Start-Process $config.FrontendUrl | Out-Null
+    Open-FrontendBrowser -Config $config -Url $config.FrontendUrl
 }
 
 Write-StackLog -Config $config -Component 'OPENWEBUI' -Level 'OK' -Message "Open WebUI ready at $($config.FrontendUrl)."

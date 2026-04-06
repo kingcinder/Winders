@@ -16,6 +16,8 @@ Run the full bootstrap:
 powershell -ExecutionPolicy Bypass -File .\setup-local-llm-stack.ps1
 ```
 
+The bootstrap still requires an elevated Windows shell because the actual stack installs under `C:\LocalLLM`.
+
 Compatibility entrypoints remain available:
 
 - `setup-local-llm.ps1`: install or update the backend runtime and launchers
@@ -41,8 +43,15 @@ powershell -ExecutionPolicy Bypass -File C:\LocalLLM\scripts\SELF-TEST-STACK.ps1
 
 Local model selection:
 
+- `INITIALIZE-MODEL-SELECTION.cmd` is the obvious first step for local GGUF use. It creates/opens `C:\LocalLLM\models`, waits for at least one `.gguf`, and then launches the selector.
 - `START-LOCAL-MODEL.cmd` prompts for a local GGUF and now enumerates `C:\LocalLLM\models` first.
 - `START-MODELS-DIR.cmd` uses that same selector, so the canonical local model folder is `C:\LocalLLM\models`.
+
+Streaming voice:
+
+- Open WebUI can use a local Kokoro CPU TTS sidecar and a Chromium extension from `C:\LocalLLM\browser-tts-extension` for sentence-by-sentence autoplay voice.
+- On this target hardware the streaming browser TTS path is disabled by default in favor of system stability.
+- If you explicitly re-enable `TtsEnabled` and `StreamingTtsAutoplayEnabled`, `start-openwebui.ps1` will load the extension through Edge/Chrome. If Chromium is unavailable, the stack falls back to a normal browser open without autoplay voice.
 
 ## Behavior guarantees
 

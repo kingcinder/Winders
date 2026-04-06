@@ -17,21 +17,84 @@ function Fail-Backend {
     exit 1
 }
 
+function Get-GpuInventory {
+    New-Item -ItemType Directory -Force -Path $config.TempDir | Out-Null
+    $probeToken = [guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $config.TempDir "backend-list-devices.$probeToken.stdout.log"
+    $stderrPath = Join-Path $config.TempDir "backend-list-devices.$probeToken.stderr.log"
+    try {
+        $process = Start-Process -FilePath $config.BackendBinaryPath -ArgumentList @('--list-devices') -WorkingDirectory (Split-Path -Parent $config.BackendBinaryPath) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            Fail-Backend "Failed to enumerate inference devices from '$($config.BackendBinaryPath)'."
+        }
+        $output = @()
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $output += Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stderrPath) {
+            $output += Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stdoutPath) { Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $stderrPath) { Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue }
+    }
+
+    $blockedPatterns = @($config.BlockedInferenceGpuPatterns | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $devices = New-Object System.Collections.Generic.List[object]
+    foreach ($line in $output) {
+        $text = [string]$line
+        if ($text -match '^\s*Vulkan(\d+):\s+(.+?)\s+\(') {
+            $name = $Matches[2].Trim()
+            $isBlocked = $false
+            foreach ($pattern in $blockedPatterns) {
+                if ($name -match [regex]::Escape($pattern)) {
+                    $isBlocked = $true
+                    break
+                }
+            }
+            $devices.Add([pscustomobject]@{
+                Index = [int]$Matches[1]
+                Name = $name
+                Blocked = $isBlocked
+            })
+        }
+    }
+
+    if ($devices.Count -eq 0) {
+        Fail-Backend "No Vulkan inference devices were detected by '$($config.BackendBinaryPath)'."
+    }
+
+    return @($devices.ToArray())
+}
+
 function Get-GpuIndex {
+    $devices = @(Get-GpuInventory)
+
     if (-not [string]::IsNullOrWhiteSpace([string]$config.GPUIndexOverride)) {
-        return [int][string]$config.GPUIndexOverride
+        $selectedIndex = [int][string]$config.GPUIndexOverride
+    } else {
+        if (-not (Test-Path -LiteralPath $config.GPUIndexStateFile)) {
+            Fail-Backend "GPU index state file missing at '$($config.GPUIndexStateFile)'."
+        }
+
+        $value = (Get-Content -Raw -LiteralPath $config.GPUIndexStateFile).Trim()
+        if (-not ($value -match '^\d+$')) {
+            Fail-Backend "GPU index state file '$($config.GPUIndexStateFile)' does not contain a numeric value."
+        }
+
+        $selectedIndex = [int]$value
     }
 
-    if (-not (Test-Path -LiteralPath $config.GPUIndexStateFile)) {
-        Fail-Backend "GPU index state file missing at '$($config.GPUIndexStateFile)'."
+    $selectedDevice = $devices | Where-Object { $_.Index -eq $selectedIndex } | Select-Object -First 1
+    if (-not $selectedDevice) {
+        Fail-Backend "Configured GPU index $selectedIndex was not found in the current Vulkan device list."
     }
 
-    $value = (Get-Content -Raw -LiteralPath $config.GPUIndexStateFile).Trim()
-    if (-not ($value -match '^\d+$')) {
-        Fail-Backend "GPU index state file '$($config.GPUIndexStateFile)' does not contain a numeric value."
+    if ($selectedDevice.Blocked) {
+        Fail-Backend "Configured GPU index $selectedIndex resolves to blocked device '$($selectedDevice.Name)'. This stack will not use the NVIDIA Quadro K600 for inference."
     }
 
-    return [int]$value
+    return $selectedIndex
 }
 
 function Test-BackendMatchesRequest {
@@ -78,7 +141,22 @@ function Start-BackendProcess {
     }
 
     $gpuLayersValue = if ([string]::IsNullOrWhiteSpace([string]$config.GPULayers)) { 'auto' } else { [string]$config.GPULayers }
-    foreach ($item in @('--host', $config.BackendHost, '--port', [string]$config.BackendPort, '-c', [string]$config.ContextLength, '-ngl', $gpuLayersValue, '-sm', 'none', '-mg', [string]$gpuIndex, '-fit', 'on', '-fa', 'auto')) {
+    $flashAttentionValue = if ([string]::IsNullOrWhiteSpace([string]$config.BackendFlashAttention)) { 'off' } else { [string]$config.BackendFlashAttention }
+    foreach ($item in @(
+        '--host', $config.BackendHost,
+        '--port', [string]$config.BackendPort,
+        '-c', [string]$config.ContextLength,
+        '-ngl', $gpuLayersValue,
+        '-sm', 'none',
+        '-mg', [string]$gpuIndex,
+        '-fit', 'on',
+        '-fa', $flashAttentionValue,
+        '-np', [string]$config.BackendParallelSlots,
+        '-b', [string]$config.BackendBatchSize,
+        '-ub', [string]$config.BackendUbatchSize,
+        '--cache-ram', [string]$config.BackendPromptCacheMiB,
+        '--no-cache-prompt'
+    )) {
         $arguments.Add($item)
     }
 

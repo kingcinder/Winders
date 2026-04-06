@@ -1,0 +1,10 @@
+{
+  "frontend_url": "http://127.0.0.1:3000",
+  "tts_api_base_url": "http://127.0.0.1:8880/v1",
+  "tts_api_key": "not-needed",
+  "tts_model": "kokoro",
+  "tts_voice": "af_bella",
+  "tts_response_format": "pcm",
+  "tts_speed": 1.0,
+  "autoplay": true
+}

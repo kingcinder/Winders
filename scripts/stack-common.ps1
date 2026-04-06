@@ -29,6 +29,19 @@ function Get-DefaultStackConfig {
         BackendPort = 8080
         FrontendHost = '127.0.0.1'
         FrontendPort = 3000
+        TtsEnabled = $false
+        TtsServiceName = 'kokoro-tts'
+        TtsContainerName = 'kokoro-tts-local'
+        TtsHost = '127.0.0.1'
+        TtsPort = 8880
+        TtsDockerHost = 'kokoro-tts'
+        TtsImage = 'ghcr.io/remsky/kokoro-fastapi-cpu:latest'
+        TtsApiKey = 'not-needed'
+        TtsModel = 'kokoro'
+        TtsVoice = 'af_bella'
+        TtsResponseFormat = 'pcm'
+        TtsPlaybackSpeed = '1.0'
+        StreamingTtsAutoplayEnabled = $false
         ToolServerEnabled = $true
         ToolServerName = 'Local System Tools'
         ToolServerHost = '127.0.0.1'
@@ -57,8 +70,15 @@ function Get-DefaultStackConfig {
         ContextLength = 4096
         GPULayers = 'auto'
         GPUIndexOverride = ''
+        BlockedInferenceGpuPatterns = @('Quadro K600', 'K600')
+        BackendParallelSlots = 1
+        BackendBatchSize = 512
+        BackendUbatchSize = 128
+        BackendPromptCacheMiB = 0
+        BackendFlashAttention = 'off'
         AutoOpenBrowser = $true
         BrowserAutoOpen = $true
+        BrowserDisableGpu = $true
         DisableWebUIAuth = $true
         OpenWebUiAuthEnabled = $false
         SmokeTestRepo = 'Qwen/Qwen2.5-1.5B-Instruct-GGUF'
@@ -166,6 +186,9 @@ function Resolve-StackConfig {
     $resolved.StateDir = if ($resolved.ContainsKey('StateDir') -and $resolved.StateDir) { $resolved.StateDir } else { Join-Path $root 'state' }
     $resolved.OpenWebUiDir = if ($resolved.ContainsKey('OpenWebUiDir') -and $resolved.OpenWebUiDir) { $resolved.OpenWebUiDir } else { Join-Path $root 'openwebui' }
     $resolved.OpenWebUiDataDir = if ($resolved.ContainsKey('OpenWebUiDataDir') -and $resolved.OpenWebUiDataDir) { $resolved.OpenWebUiDataDir } else { Join-Path $resolved.OpenWebUiDir 'data' }
+    $resolved.TtsCacheDir = if ($resolved.ContainsKey('TtsCacheDir') -and $resolved.TtsCacheDir) { $resolved.TtsCacheDir } else { Join-Path $root 'tts-cache' }
+    $resolved.BrowserTtsExtensionDir = if ($resolved.ContainsKey('BrowserTtsExtensionDir') -and $resolved.BrowserTtsExtensionDir) { $resolved.BrowserTtsExtensionDir } else { Join-Path $root 'browser-tts-extension' }
+    $resolved.BrowserProfileDir = if ($resolved.ContainsKey('BrowserProfileDir') -and $resolved.BrowserProfileDir) { $resolved.BrowserProfileDir } else { Join-Path $root 'browser-profile' }
     $resolved.TempDir = if ($resolved.ContainsKey('TempDir') -and $resolved.TempDir) { $resolved.TempDir } else { Join-Path $env:TEMP 'local-llm-bootstrap' }
     $resolved.ConfigPath = if ($resolved.ContainsKey('ConfigPath') -and $resolved.ConfigPath) { $resolved.ConfigPath } else { Get-StackConfigPath }
     $resolved.StateFileName = if ($resolved.ContainsKey('StateFileName') -and $resolved.StateFileName) { $resolved.StateFileName } else { 'install-state.json' }
@@ -218,6 +241,9 @@ function Resolve-StackConfig {
     $resolved.BackendModelsUrl = "$($resolved.BackendBaseUrl)/v1/models"
     $resolved.FrontendUrl = "http://$($resolved.FrontendHost):$($resolved.FrontendPort)"
     $resolved.BackendApiBaseUrl = "http://host.docker.internal:$($resolved.BackendPort)/v1"
+    $resolved.TtsApiBaseUrl = "http://$($resolved.TtsHost):$($resolved.TtsPort)/v1"
+    $resolved.TtsDockerApiBaseUrl = "http://$($resolved.TtsDockerHost):8880/v1"
+    $resolved.TtsHealthUrl = "http://$($resolved.TtsHost):$($resolved.TtsPort)/health"
     $resolved.ToolServerBaseUrl = "http://$($resolved.ToolServerHost):$($resolved.ToolServerPort)"
     $resolved.ToolServerDockerBaseUrl = "http://$($resolved.ToolServerDockerHost):$($resolved.ToolServerPort)"
     $resolved.ToolServerHealthUrl = "$($resolved.ToolServerBaseUrl)/health"
@@ -254,9 +280,10 @@ function Save-StackConfig {
 
     foreach ($derived in @(
         'Root','BinDir','ModelsDir','ScriptsDir','LogsDir','ConfigDir','StateDir','OpenWebUiDir','OpenWebUiDataDir',
-        'TempDir','ConfigPath','BackendPidFile','GPUIndexStateFile','DeviceDumpFile','BackendBinaryPath',
-        'OpenWebUiComposeFile','OpenWebUiFingerprintFile','BackendBaseUrl','BackendHealthUrl','BackendModelsUrl',
-        'FrontendUrl','BackendApiBaseUrl','ToolServerDir','ToolServerSrcDir','ToolServerVenvDir',
+        'TtsCacheDir','BrowserTtsExtensionDir','BrowserProfileDir','TempDir','ConfigPath','BackendPidFile',
+        'GPUIndexStateFile','DeviceDumpFile','BackendBinaryPath','OpenWebUiComposeFile','OpenWebUiFingerprintFile',
+        'BackendBaseUrl','BackendHealthUrl','BackendModelsUrl','FrontendUrl','BackendApiBaseUrl','TtsApiBaseUrl',
+        'TtsDockerApiBaseUrl','TtsHealthUrl','ToolServerDir','ToolServerSrcDir','ToolServerVenvDir',
         'ToolServerRequirementsPath','ToolServerConfigPath','ToolServerPidFile','ToolServerStdOutLog',
         'ToolServerStdErrLog','ToolServerAuditLog','ToolServerPythonPath','ToolServerAppPath',
         'ToolServerBaseUrl','ToolServerDockerBaseUrl','ToolServerHealthUrl'
@@ -282,6 +309,16 @@ function Validate-StackConfig {
         }
     }
 
+    if ([bool]$Config.TtsEnabled) {
+        $ttsPort = [string]$Config.TtsPort
+        if (-not ($ttsPort -match '^\d+$')) {
+            throw "Invalid config field 'TtsPort': value '$ttsPort' is not numeric."
+        }
+        if ([int]$ttsPort -lt 1 -or [int]$ttsPort -gt 65535) {
+            throw "Invalid config field 'TtsPort': value '$ttsPort' is outside 1-65535."
+        }
+    }
+
     if ([bool]$Config.ToolServerEnabled) {
         $toolPort = [string]$Config.ToolServerPort
         if (-not ($toolPort -match '^\d+$')) {
@@ -302,7 +339,15 @@ function Validate-StackConfig {
         }
     }
 
-    foreach ($field in @('StartupTimeoutSec', 'BackendStartupTimeoutSec', 'UiStartupTimeoutSec', 'ContextLength')) {
+    foreach ($field in @(
+        'StartupTimeoutSec',
+        'BackendStartupTimeoutSec',
+        'UiStartupTimeoutSec',
+        'ContextLength',
+        'BackendParallelSlots',
+        'BackendBatchSize',
+        'BackendUbatchSize'
+    )) {
         $value = [string]$Config.$field
         if (-not ($value -match '^\d+$')) {
             throw "Invalid config field '$field': value '$value' is not a positive integer."
@@ -310,6 +355,19 @@ function Validate-StackConfig {
         if ([int]$value -le 0) {
             throw "Invalid config field '$field': value '$value' must be greater than zero."
         }
+    }
+
+    $promptCacheValue = [string]$Config.BackendPromptCacheMiB
+    if (-not ($promptCacheValue -match '^-?\d+$')) {
+        throw "Invalid config field 'BackendPromptCacheMiB': value '$promptCacheValue' must be an integer."
+    }
+    if ([int]$promptCacheValue -lt -1) {
+        throw "Invalid config field 'BackendPromptCacheMiB': value '$promptCacheValue' must be -1 or greater."
+    }
+
+    $flashAttentionValue = [string]$Config.BackendFlashAttention
+    if ($flashAttentionValue -notin @('on', 'off', 'auto')) {
+        throw "Invalid config field 'BackendFlashAttention': value '$flashAttentionValue' must be one of on, off, auto."
     }
 
     foreach ($field in @(
@@ -339,6 +397,18 @@ function Validate-StackConfig {
         }
     }
 
+    if ([bool]$Config.TtsEnabled) {
+        foreach ($field in @(
+            'TtsServiceName','TtsContainerName','TtsHost','TtsDockerHost','TtsImage','TtsApiKey','TtsModel',
+            'TtsVoice','TtsResponseFormat','TtsPlaybackSpeed','TtsCacheDir','BrowserTtsExtensionDir','BrowserProfileDir'
+        )) {
+            $value = [string]$Config.$field
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                throw "Invalid config field '$field': value '$value' must be non-empty."
+            }
+        }
+    }
+
     if ([bool]$Config.LinuxVmEnabled) {
         foreach ($field in @('LinuxVmProvider', 'VirtualBoxVmName', 'LinuxVmSshHost', 'LinuxVmNatRuleName')) {
             $value = [string]$Config.$field
@@ -355,8 +425,17 @@ function Validate-StackConfig {
         }
     }
 
+    if ($Config.PSObject.Properties.Name -contains 'BlockedInferenceGpuPatterns') {
+        $patterns = @($Config.BlockedInferenceGpuPatterns)
+        foreach ($pattern in $patterns) {
+            if ([string]::IsNullOrWhiteSpace([string]$pattern)) {
+                throw "Invalid config field 'BlockedInferenceGpuPatterns': patterns must be non-empty strings."
+            }
+        }
+    }
+
     $invalidPathChars = [System.IO.Path]::GetInvalidPathChars()
-    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile', 'ToolServerDir', 'ToolServerSrcDir', 'ToolServerVenvDir', 'ToolServerRequirementsPath', 'ToolServerConfigPath', 'ToolServerPidFile', 'ToolServerStdOutLog', 'ToolServerStdErrLog', 'ToolServerAuditLog', 'ToolServerPythonPath', 'ToolServerAppPath', 'LinuxVmPrivateKeyPath')) {
+    foreach ($field in @('LocalModelPath', 'BackendBinaryPath', 'BackendPidFile', 'GPUIndexStateFile', 'DeviceDumpFile', 'OpenWebUiComposeFile', 'OpenWebUiFingerprintFile', 'TtsCacheDir', 'BrowserTtsExtensionDir', 'BrowserProfileDir', 'ToolServerDir', 'ToolServerSrcDir', 'ToolServerVenvDir', 'ToolServerRequirementsPath', 'ToolServerConfigPath', 'ToolServerPidFile', 'ToolServerStdOutLog', 'ToolServerStdErrLog', 'ToolServerAuditLog', 'ToolServerPythonPath', 'ToolServerAppPath', 'LinuxVmPrivateKeyPath')) {
         $value = [string]$Config.$field
         if ($value.IndexOfAny($invalidPathChars) -ge 0) {
             throw "Invalid config field '$field': value '$value' contains invalid path characters."
@@ -400,7 +479,7 @@ function Assert-SupportedPlatform {
 function Ensure-StackDirectories {
     param([pscustomobject]$Config)
 
-    foreach ($path in @($Config.Root, $Config.BinDir, $Config.ModelsDir, $Config.ScriptsDir, $Config.LogsDir, $Config.ConfigDir, $Config.StateDir, $Config.OpenWebUiDir, $Config.OpenWebUiDataDir, $Config.ToolServerDir, $Config.ToolServerSrcDir)) {
+    foreach ($path in @($Config.Root, $Config.BinDir, $Config.ModelsDir, $Config.ScriptsDir, $Config.LogsDir, $Config.ConfigDir, $Config.StateDir, $Config.OpenWebUiDir, $Config.OpenWebUiDataDir, $Config.TtsCacheDir, $Config.BrowserTtsExtensionDir, $Config.BrowserProfileDir, $Config.ToolServerDir, $Config.ToolServerSrcDir)) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
 }
@@ -467,8 +546,15 @@ function Test-DockerDaemonReachable {
     }
 
     try {
-        & docker version | Out-Null
-        return ($LASTEXITCODE -eq 0)
+        $previousPreference = $ErrorActionPreference
+        $serverVersion = $null
+        try {
+            $ErrorActionPreference = 'Continue'
+            $serverVersion = (& docker info --format '{{.ServerVersion}}' 2>$null)
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($serverVersion -join '').Trim()))
     } catch {
         return $false
     }
@@ -839,6 +925,16 @@ function Get-OpenWebUiFingerprintInputs {
         OpenWebUiAuthEnabled = [bool]$Config.OpenWebUiAuthEnabled
         OpenWebUiDataDir = $Config.OpenWebUiDataDir
         BackendApiBaseUrl = $Config.BackendApiBaseUrl
+        TtsEnabled = [bool]$Config.TtsEnabled
+        TtsImage = $Config.TtsImage
+        TtsHost = $Config.TtsHost
+        TtsPort = $Config.TtsPort
+        TtsModel = $Config.TtsModel
+        TtsVoice = $Config.TtsVoice
+        TtsResponseFormat = $Config.TtsResponseFormat
+        TtsPlaybackSpeed = $Config.TtsPlaybackSpeed
+        TtsCacheDir = $Config.TtsCacheDir
+        StreamingTtsAutoplayEnabled = [bool]$Config.StreamingTtsAutoplayEnabled
         OpenAiApiKey = $Config.OpenAiApiKey
         GlobalLogLevel = $Config.GlobalLogLevel
         ToolServerConnections = $toolServerConnections
@@ -852,9 +948,32 @@ function Get-OpenWebUiComposeContent {
     )
 
     $dataDirForDocker = $Config.OpenWebUiDataDir -replace '\\', '/'
+    $ttsCacheDirForDocker = $Config.TtsCacheDir -replace '\\', '/'
     $authValue = if ($Config.OpenWebUiAuthEnabled) { 'true' } else { 'false' }
     $toolServerConnections = @(Get-OpenWebUiToolServerConnections -Config $Config)
     $toolServerConnectionsJson = (ConvertTo-Json -InputObject $toolServerConnections -Depth 10 -Compress) -replace "'", "''"
+    $ttsEnvironmentBlock = ''
+    $ttsServiceBlock = ''
+
+    if ([bool]$Config.TtsEnabled) {
+        $ttsEnvironmentBlock = @"
+      AUDIO_TTS_ENGINE: "openai"
+      AUDIO_TTS_OPENAI_API_BASE_URL: "$($Config.TtsDockerApiBaseUrl)"
+      AUDIO_TTS_OPENAI_API_KEY: "$($Config.TtsApiKey)"
+      AUDIO_TTS_MODEL: "$($Config.TtsModel)"
+      AUDIO_TTS_VOICE: "$($Config.TtsVoice)"
+"@
+        $ttsServiceBlock = @"
+  $($Config.TtsServiceName):
+    image: $($Config.TtsImage)
+    container_name: $($Config.TtsContainerName)
+    restart: unless-stopped
+    ports:
+      - "$($Config.TtsHost):$($Config.TtsPort):8880"
+    volumes:
+      - "${ttsCacheDirForDocker}:/root/.cache"
+"@
+    }
 
     return @"
 services:
@@ -870,12 +989,14 @@ services:
       WEBUI_AUTH: "$authValue"
       GLOBAL_LOG_LEVEL: "$($Config.GlobalLogLevel)"
       TOOL_SERVER_CONNECTIONS: '$toolServerConnectionsJson'
+$ttsEnvironmentBlock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     labels:
       - "localllm.openwebui.config-fingerprint=$Fingerprint"
     volumes:
       - "${dataDirForDocker}:/app/backend/data"
+$ttsServiceBlock
 "@
 }
 
@@ -1005,6 +1126,37 @@ function Get-ConfiguredLocalModelStatus {
     }
 }
 
+function Get-TtsStatus {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.TtsEnabled) {
+        return [pscustomobject]@{
+            Enabled = $false
+            HealthOk = $false
+            Ready = $false
+            Error = 'disabled'
+            Container = $null
+        }
+    }
+
+    $container = $null
+    if (Test-DockerDaemonReachable) {
+        $container = Get-OpenWebUiContainerState -Config ([pscustomobject]@{
+            ContainerName = $Config.TtsContainerName
+        })
+    }
+    $health = Test-UrlSuccess -Url $Config.TtsHealthUrl -TimeoutSec 5
+
+    return [pscustomobject]@{
+        Enabled = $true
+        Container = $container
+        HealthOk = [bool]$health.Success
+        Ready = ([bool]$health.Success -and $container -and $container.Exists -and $container.Running)
+        StatusCode = $health.StatusCode
+        Error = $health.Error
+    }
+}
+
 function Deploy-RepoScripts {
     param(
         [string]$RepoScriptsDir,
@@ -1029,6 +1181,29 @@ function Deploy-RepoDirectory {
 
     New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
     Copy-Item -Path (Join-Path $SourceDir '*') -Destination $DestinationDir -Recurse -Force
+}
+
+function Write-BrowserTtsRuntimeConfig {
+    param([pscustomobject]$Config)
+
+    if (-not [bool]$Config.StreamingTtsAutoplayEnabled) {
+        return
+    }
+
+    $runtimeConfig = [ordered]@{
+        frontend_url = $Config.FrontendUrl
+        tts_api_base_url = $Config.TtsApiBaseUrl
+        tts_api_key = $Config.TtsApiKey
+        tts_model = $Config.TtsModel
+        tts_voice = $Config.TtsVoice
+        tts_response_format = $Config.TtsResponseFormat
+        tts_speed = [double]$Config.TtsPlaybackSpeed
+        autoplay = $true
+    }
+
+    $path = Join-Path $Config.BrowserTtsExtensionDir 'runtime-config.json'
+    New-Item -ItemType Directory -Force -Path $Config.BrowserTtsExtensionDir | Out-Null
+    $runtimeConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
 }
 
 function New-RandomHexToken {
@@ -1300,6 +1475,68 @@ function Get-ToolServerStatus {
         StatusCode = $health.StatusCode
         Error = $health.Error
     }
+}
+
+function Get-PreferredChromiumBrowserPath {
+    $candidates = @(
+        'C:\Users\ceide\AppData\Local\Programs\Opera\opera.exe',
+        'C:\Users\ceide\AppData\Local\Programs\Opera GX\opera.exe',
+        'C:\Program Files\Opera\launcher.exe',
+        'C:\Program Files\Opera GX\launcher.exe',
+        'C:\Program Files (x86)\Opera\launcher.exe',
+        'C:\Program Files (x86)\Opera GX\launcher.exe',
+        'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+        'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+        'C:\Program Files\Google\Chrome\Application\chrome.exe',
+        'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Open-FrontendBrowser {
+    param(
+        [pscustomobject]$Config,
+        [string]$Url
+    )
+
+    if ([bool]$Config.StreamingTtsAutoplayEnabled -and (Test-Path -LiteralPath (Join-Path $Config.BrowserTtsExtensionDir 'manifest.json'))) {
+        $browserPath = Get-PreferredChromiumBrowserPath
+        if ($browserPath) {
+            Write-BrowserTtsRuntimeConfig -Config $Config
+            New-Item -ItemType Directory -Force -Path $Config.BrowserProfileDir | Out-Null
+            $arguments = @(
+                "--user-data-dir=$($Config.BrowserProfileDir)",
+                "--disable-extensions-except=$($Config.BrowserTtsExtensionDir)",
+                "--load-extension=$($Config.BrowserTtsExtensionDir)",
+                '--new-window',
+                $Url
+            )
+            if ([bool]$Config.BrowserDisableGpu) {
+                $arguments = @('--disable-gpu') + $arguments
+            }
+            Start-Process -FilePath $browserPath -ArgumentList $arguments | Out-Null
+            return
+        }
+    }
+
+    $browserPath = Get-PreferredChromiumBrowserPath
+    if ($browserPath) {
+        $arguments = @('--new-window', $Url)
+        if ([bool]$Config.BrowserDisableGpu) {
+            $arguments = @('--disable-gpu') + $arguments
+        }
+        Start-Process -FilePath $browserPath -ArgumentList $arguments | Out-Null
+        return
+    }
+
+    Start-Process $Url | Out-Null
 }
 
 function Wait-ForToolServerReady {

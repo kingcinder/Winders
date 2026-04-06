@@ -83,29 +83,57 @@ function Test-ExistingRuntimeHealthy {
     }
 
     try {
-        $versionOutput = & $CurrentConfig.BackendBinaryPath --version 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
+        $versionResult = Invoke-LlamaBinaryCapture -LlamaServerExe $CurrentConfig.BackendBinaryPath -ArgumentList @('--version') -Prefix 'runtime-version'
+        if ($versionResult.ExitCode -ne 0 -or -not ($versionResult.StdoutText.Trim() -or $versionResult.StderrText.Trim())) {
             return $false
         }
-        $deviceOutput = & $CurrentConfig.BackendBinaryPath --list-devices 2>&1
-        return ($LASTEXITCODE -eq 0 -and $deviceOutput)
+        $deviceResult = Invoke-LlamaBinaryCapture -LlamaServerExe $CurrentConfig.BackendBinaryPath -ArgumentList @('--list-devices') -Prefix 'runtime-devices'
+        return ($deviceResult.ExitCode -eq 0 -and $deviceResult.CombinedLines.Count -gt 0)
     } catch {
         return $false
     }
 }
 
-function Invoke-LlamaBinaryProbe($llamaServerExe) {
-    $probeOut = Join-Path $config.TempDir 'llama-probe.stdout.log'
-    $probeErr = Join-Path $config.TempDir 'llama-probe.stderr.log'
+function Invoke-LlamaBinaryCapture {
+    param(
+        [string]$LlamaServerExe,
+        [string[]]$ArgumentList,
+        [string]$Prefix
+    )
+
+    $probeOut = Join-Path $config.TempDir "$Prefix.stdout.log"
+    $probeErr = Join-Path $config.TempDir "$Prefix.stderr.log"
     if (Test-Path -LiteralPath $probeOut) { Remove-Item -LiteralPath $probeOut -Force }
     if (Test-Path -LiteralPath $probeErr) { Remove-Item -LiteralPath $probeErr -Force }
 
-    $process = Start-Process -FilePath $llamaServerExe -ArgumentList '--help' -PassThru -Wait -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+    $process = Start-Process -FilePath $LlamaServerExe -ArgumentList $ArgumentList -PassThru -Wait -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+    $stdoutText = ''
+    if (Test-Path -LiteralPath $probeOut) {
+        $stdoutText = Get-Content -LiteralPath $probeOut -Raw -ErrorAction SilentlyContinue
+        if ($null -eq $stdoutText) { $stdoutText = '' }
+    }
+    $stderrText = ''
+    if (Test-Path -LiteralPath $probeErr) {
+        $stderrText = Get-Content -LiteralPath $probeErr -Raw -ErrorAction SilentlyContinue
+        if ($null -eq $stderrText) { $stderrText = '' }
+    }
+    $combinedLines = @()
+    if ($stdoutText) { $combinedLines += ($stdoutText -split "`r?`n") }
+    if ($stderrText) { $combinedLines += ($stderrText -split "`r?`n") }
+    $combinedLines = @($combinedLines | Where-Object { $_ -and $_.Trim() })
+
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
         StdoutPath = $probeOut
         StderrPath = $probeErr
+        StdoutText = $stdoutText
+        StderrText = $stderrText
+        CombinedLines = $combinedLines
     }
+}
+
+function Invoke-LlamaBinaryProbe($llamaServerExe) {
+    return Invoke-LlamaBinaryCapture -LlamaServerExe $llamaServerExe -ArgumentList @('--help') -Prefix 'llama-probe'
 }
 
 function Ensure-VcRedist {
@@ -123,20 +151,42 @@ function Ensure-VcRedist {
 
 function Detect-GpuIndex($llamaServerExe) {
     Write-Info 'Detecting Vulkan devices...'
-    $out = & $llamaServerExe --list-devices 2>&1
-    $out | Set-Content -Path $config.DeviceDumpFile -Encoding UTF8
-    $lines = $out | ForEach-Object { "$_" }
+    $deviceResult = Invoke-LlamaBinaryCapture -LlamaServerExe $llamaServerExe -ArgumentList @('--list-devices') -Prefix 'gpu-detect'
+    if ($deviceResult.ExitCode -ne 0) {
+        $stderrTail = ($deviceResult.CombinedLines | Select-Object -Last 20) -join ' | '
+        throw "Failed to detect Vulkan devices. ExitCode=$($deviceResult.ExitCode). Output=$stderrTail"
+    }
+    $deviceResult.CombinedLines | Set-Content -Path $config.DeviceDumpFile -Encoding UTF8
+    $lines = $deviceResult.CombinedLines | ForEach-Object { "$_" }
     $preferredPatterns = @('AMD Radeon RX 5700 XT', 'Radeon RX 5700 XT', '5700 XT', 'NAVI10', 'AMD')
+    $blockedPatterns = @($config.BlockedInferenceGpuPatterns | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $bestIndex = $null
+    $deviceMap = @{}
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*Vulkan(\d+):\s+(.+?)\s+\(') {
+            $deviceMap[[int]$Matches[1]] = $Matches[2].Trim()
+        }
+    }
 
     foreach ($pattern in $preferredPatterns) {
         foreach ($line in $lines) {
             if ($line -match $pattern -and $line -match '(^|\s)(\d+)\s*[:\-]') {
-                $bestIndex = [int]$Matches[2]
+                $candidate = [int]$Matches[2]
+                $name = [string]($deviceMap[$candidate])
+                if ($blockedPatterns | Where-Object { $name -match [regex]::Escape($_) }) {
+                    continue
+                }
+                $bestIndex = $candidate
                 break
             }
             if ($line -match $pattern -and $line -match 'Device\s+(\d+)') {
-                $bestIndex = [int]$Matches[1]
+                $candidate = [int]$Matches[1]
+                $name = [string]($deviceMap[$candidate])
+                if ($blockedPatterns | Where-Object { $name -match [regex]::Escape($_) }) {
+                    continue
+                }
+                $bestIndex = $candidate
                 break
             }
         }
@@ -146,11 +196,21 @@ function Detect-GpuIndex($llamaServerExe) {
     if ($bestIndex -eq $null) {
         foreach ($line in $lines) {
             if ($line -match '(^|\s)(\d+)\s*[:\-]') {
-                $bestIndex = [int]$Matches[2]
+                $candidate = [int]$Matches[2]
+                $name = [string]($deviceMap[$candidate])
+                if ($blockedPatterns | Where-Object { $name -match [regex]::Escape($_) }) {
+                    continue
+                }
+                $bestIndex = $candidate
                 break
             }
             if ($line -match 'Device\s+(\d+)') {
-                $bestIndex = [int]$Matches[1]
+                $candidate = [int]$Matches[1]
+                $name = [string]($deviceMap[$candidate])
+                if ($blockedPatterns | Where-Object { $name -match [regex]::Escape($_) }) {
+                    continue
+                }
+                $bestIndex = $candidate
                 break
             }
         }
@@ -264,7 +324,9 @@ Validate-StackConfig -Config $config
 Save-StackConfig -Config $config
 Deploy-RepoScripts -RepoScriptsDir (Join-Path $PSScriptRoot 'scripts') -InstallScriptsDir $config.ScriptsDir
 Deploy-RepoDirectory -SourceDir (Join-Path $PSScriptRoot 'toolserver') -DestinationDir $config.ToolServerDir
+Deploy-RepoDirectory -SourceDir (Join-Path $PSScriptRoot 'browser-tts-extension') -DestinationDir $config.BrowserTtsExtensionDir
 Write-ToolServerRuntimeConfig -Config $config
+Write-BrowserTtsRuntimeConfig -Config $config
 
 $startSmoke = @"
 @echo off
@@ -305,6 +367,7 @@ Folders:
   Logs   : $($config.LogsDir)
 
 Start scripts:
+  $($config.ScriptsDir)\INITIALIZE-MODEL-SELECTION.cmd
   $($config.ScriptsDir)\START-QWEN-SMOKETEST.cmd
   $($config.ScriptsDir)\START-LOCAL-MODEL.cmd
   $($config.ScriptsDir)\START-MODELS-DIR.cmd
@@ -331,11 +394,16 @@ Notes:
     $($config.ToolServerHealthUrl)
   - Open WebUI consumes the local tool server through:
     $($config.ToolServerDockerBaseUrl)
+  - Local streaming TTS API:
+    $($config.TtsApiBaseUrl)
+  - Browser extension path for near-real-time voice playback:
+    $($config.BrowserTtsExtensionDir)
 "@
 
 $startSmoke | Set-Content -Path (Join-Path $config.ScriptsDir 'START-QWEN-SMOKETEST.cmd') -Encoding ASCII
 $startLocal | Set-Content -Path (Join-Path $config.ScriptsDir 'START-LOCAL-MODEL.cmd') -Encoding ASCII
 $startLocalFixed | Set-Content -Path (Join-Path $config.ScriptsDir 'START-MODELS-DIR.cmd') -Encoding ASCII
+Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'INITIALIZE-MODEL-SELECTION.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\initialize-model-selection.ps1`""
 $apiTest | Set-Content -Path (Join-Path $config.ScriptsDir 'TEST-API.cmd') -Encoding ASCII
 Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'START-STACK.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\start-stack.ps1`""
 Write-CmdWrapper -Path (Join-Path $config.ScriptsDir 'REPAIR-STACK.cmd') -PowerShellArguments "-File `"$($config.ScriptsDir)\REPAIR-STACK.ps1`""
@@ -349,6 +417,7 @@ $readme | Set-Content -Path (Join-Path $config.Root 'README.txt') -Encoding UTF8
 $desktop = [Environment]::GetFolderPath('Desktop')
 $wsh = New-Object -ComObject WScript.Shell
 foreach ($shortcut in @(
+    @{ Name = 'Local LLM - Initialize Model Selection.lnk'; Target = Join-Path $config.ScriptsDir 'INITIALIZE-MODEL-SELECTION.cmd' },
     @{ Name = 'Local LLM - Qwen Smoke Test.lnk'; Target = Join-Path $config.ScriptsDir 'START-QWEN-SMOKETEST.cmd' },
     @{ Name = 'Local LLM - Start Local GGUF.lnk'; Target = Join-Path $config.ScriptsDir 'START-LOCAL-MODEL.cmd' },
     @{ Name = 'Local LLM - Models Folder GGUF.lnk'; Target = Join-Path $config.ScriptsDir 'START-MODELS-DIR.cmd' },
@@ -358,7 +427,8 @@ foreach ($shortcut in @(
     @{ Name = 'Local LLM - Self Test.lnk'; Target = $selfTestCmd },
     @{ Name = 'Local LLM - Start Tool Server.lnk'; Target = Join-Path $config.ScriptsDir 'START-TOOLSERVER.cmd' },
     @{ Name = 'Local LLM - Stop Tool Server.lnk'; Target = Join-Path $config.ScriptsDir 'STOP-TOOLSERVER.cmd' },
-    @{ Name = 'Local LLM - Tool Server Status.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-TOOLSERVER.cmd' }
+    @{ Name = 'Local LLM - Tool Server Status.lnk'; Target = Join-Path $config.ScriptsDir 'STATUS-TOOLSERVER.cmd' },
+    @{ Name = 'Local LLM - Open WebUI Voice Chat.lnk'; Target = Join-Path $config.ScriptsDir 'START-OPENWEBUI.cmd' }
 )) {
     $sc = $wsh.CreateShortcut((Join-Path $desktop $shortcut.Name))
     $sc.TargetPath = $shortcut.Target

@@ -58,5 +58,9 @@
   "StateFileName": "install-state.json",
   "BackendStdOutLogName": "backend.stdout.log",
   "BackendStdErrLogName": "backend.stderr.log",
-  "LlamaReleaseApi": "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+  "LlamaReleaseApi": "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+  "BlockedInferenceGpuPatterns": [
+    "Quadro K600",
+    "K600"
+  ]
 }

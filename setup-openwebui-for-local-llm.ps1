@@ -12,7 +12,9 @@ Save-StackConfig -Config $config
 
 Deploy-RepoScripts -RepoScriptsDir (Join-Path $PSScriptRoot 'scripts') -InstallScriptsDir $config.ScriptsDir
 Deploy-RepoDirectory -SourceDir (Join-Path $PSScriptRoot 'toolserver') -DestinationDir $config.ToolServerDir
+Deploy-RepoDirectory -SourceDir (Join-Path $PSScriptRoot 'browser-tts-extension') -DestinationDir $config.BrowserTtsExtensionDir
 Write-ToolServerRuntimeConfig -Config $config
+Write-BrowserTtsRuntimeConfig -Config $config
 
 $startBat = Join-Path $config.ScriptsDir 'START-OPENWEBUI.cmd'
 $stopBat = Join-Path $config.ScriptsDir 'STOP-OPENWEBUI.cmd'
@@ -32,6 +34,7 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 $wsh = New-Object -ComObject WScript.Shell
 foreach ($shortcut in @(
     @{ Name = 'Open WebUI.lnk'; Target = $startBat },
+    @{ Name = 'Open WebUI Voice Chat.lnk'; Target = $startBat },
     @{ Name = 'Stop Open WebUI.lnk'; Target = $stopBat },
     @{ Name = 'Open WebUI Status.lnk'; Target = $statusBat },
     @{ Name = 'Local Tool Server.lnk'; Target = $toolStartBat },

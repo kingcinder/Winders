@@ -27,6 +27,7 @@ $frontendReachable = if ($configValid) { (Test-UrlSuccess -Url $config.FrontendU
 $frontendPortOwner = if ($configValid) { Get-PortOwner -Port $config.FrontendPort } else { $null }
 $localModel = if ($configValid) { Get-ConfiguredLocalModelStatus -Config $config } else { $null }
 $toolServer = if ($configValid -and [bool]$config.ToolServerEnabled) { Get-ToolServerStatus -Config $config } else { $null }
+$ttsStatus = if ($configValid -and [bool]$config.TtsEnabled) { Get-TtsStatus -Config $config } else { $null }
 
 $issuesRed = New-Object System.Collections.Generic.List[string]
 $issuesYellow = New-Object System.Collections.Generic.List[string]
@@ -46,6 +47,7 @@ if ($configValid -and $frontendPortOwner -and $frontendPortOwner.Pid -and ((-not
 if ($toolServer -and $toolServer.Ownership.Classification -eq 'unknown-port-owner') { $issuesRed.Add('tool server port conflict') }
 if ($toolServer -and $toolServer.Ownership.Classification -eq 'not-running') { $issuesYellow.Add('local tool server unavailable') }
 if ($toolServer -and $toolServer.Ownership.BelongsToStack -and -not $toolServer.HealthOk) { $issuesYellow.Add('local tool server process running but health failing') }
+if ($ttsStatus -and -not $ttsStatus.HealthOk) { $issuesYellow.Add('local TTS service unavailable') }
 if ($state -and $state.BackendMode -eq 'local' -and $localModel -and -not $localModel.Exists) { $issuesRed.Add('local model missing while local mode selected') }
 if ($state -and $state.FallbackTriggered) { $issuesYellow.Add('smoke-test fallback active') }
 
@@ -74,6 +76,9 @@ if ($frontendContainer) {
 Write-Host "Frontend UI: $(if ($frontendReachable) { 'OK' } else { 'FAIL' })"
 if ($toolServer) {
     Write-Host "Tool server: $(if ($toolServer.Ready) { 'OK' } else { $toolServer.Ownership.Classification })"
+}
+if ($ttsStatus) {
+    Write-Host "TTS service: $(if ($ttsStatus.Ready) { 'OK' } else { 'FAIL' })"
 }
 if ($state) {
     Write-Host "Backend mode state: $($state.BackendMode)"
@@ -116,4 +121,12 @@ if ($toolServer -and $toolServer.Ownership.Pid) {
     Write-Host "PID: $($toolServer.Ownership.Pid)"
     Write-Host "Process: $($toolServer.Ownership.ProcessName)"
     Write-Host "Executable: $(if ($toolServer.Ownership.ExecutablePath) { $toolServer.Ownership.ExecutablePath } else { '<unknown>' })"
+}
+
+if ($ttsStatus -and $ttsStatus.Container -and $ttsStatus.Container.Exists) {
+    Write-Host ''
+    Write-Host 'TTS Container'
+    Write-Host "Container: $($config.TtsContainerName)"
+    Write-Host "Status: $($ttsStatus.Container.Status)"
+    Write-Host "Health: $(if ($ttsStatus.HealthOk) { 'OK' } else { 'FAIL' })"
 }
